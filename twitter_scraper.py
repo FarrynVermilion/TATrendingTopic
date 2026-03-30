@@ -1,12 +1,18 @@
 import asyncio
 import csv
-import os
 import json
+import os
 import glob
 import random
 import re
+import signal
+import logging
 from datetime import datetime, timedelta
-from collections import Counter
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import (
+    List, Dict, Set, Optional, Tuple, Any, TypedDict, Final, Union, Callable, ClassVar
+)
 from textblob import TextBlob
 from twikit import Client
 
@@ -19,7 +25,6 @@ try:
     _tx_mod.ON_DEMAND_HASH_PATTERN = r',{}:"([0-9a-f]+)"'
 
     async def _patched_get_indices(self, home_page_response, session, headers):
-        key_byte_indices = []
         response = self.validate_response(home_page_response) or self.home_page_response
         match = _tx_mod.ON_DEMAND_FILE_REGEX.search(str(response))
         if not match: raise Exception("ON_DEMAND_FILE_REGEX not found")
@@ -31,397 +36,490 @@ try:
         url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{filename}a.js"
         resp = await session.request(method="GET", url=url, headers=headers)
         indices_match = _tx_mod.INDICES_REGEX.finditer(str(resp.text))
-        for item in indices_match: key_byte_indices.append(item.group(2))
+        key_byte_indices = [item.group(2) for item in indices_match]
         if not key_byte_indices: raise Exception("Couldn't get KEY_BYTE indices")
         return int(key_byte_indices[0]), list(map(int, key_byte_indices[1:]))
 
     _tx_mod.ClientTransaction.get_indices = _patched_get_indices
-except Exception as e:
-    print(f"Warning: Twikit monkey patch failed: {e}")
+except Exception as e: print(f"Warning: Twikit monkey patch failed: {e}")
 
 # =============================================================================
+# REGION: CORE CONFIGURATION
+# =============================================================================
 
-FIELDNAMES = [
-    "keyword", "tweet_id", "username", "handle", "text", "sentiment", 
-    "url", "datetime", "likes", "retweets", "replies", "tweets_per_date"
-]
+# ANSI Styling Constants
+C_RESET: Final[str] = "\033[0m"
+C_BOLD: Final[str] = "\033[1m"
+C_RED: Final[str] = "\033[0;31m"
+C_GREEN: Final[str] = "\033[0;32m"
+C_YELLOW: Final[str] = "\033[0;33m"
+C_BLUE: Final[str] = "\033[0;34m"
+C_CYAN: Final[str] = "\033[0;36m"
+C_MAGENTA: Final[str] = "\033[0;35m"
 
-# -----------------------------------------------------------------------------
-# CORE MANAGERS & UTILITIES
-# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class AppConfig:
+    """Central configuration for the Twitter Scraper ecosystem."""
+    FIELDNAMES: ClassVar[List[str]] = [
+        "keyword", "tweet_id", "username", "handle", "text", "sentiment", 
+        "url", "datetime", "likes", "retweets", "replies", "tweets_per_date"
+    ]
+    COOLDOWN_TIERS: Final[List[int]] = field(default_factory=lambda: [60, 300, 1800, 3600]) # 1m, 5m, 30m, 1h
+    RATE_LIMIT_DELAY: Final[int] = 900 # 15m
+    PAGINATION_SLEEP: Final[float] = 1.6
+    DASHBOARD_WIDTH: Final[int] = 68
 
-class ScraperState:
-    """Manages global state for rate limits and active accounts."""
-    rate_limits = {}  # {client_id: resume_datetime}
-    busy_accounts = set() # {client_id}
+# =============================================================================
+# REGION: UI & LOGGING FRAMEWORK
+# =============================================================================
 
-    @classmethod
-    def mark_limited(cls, client):
-        cls.rate_limits[id(client)] = datetime.now() + timedelta(minutes=15)
-    
-    @classmethod
-    def is_limited(cls, client):
-        res_time = cls.rate_limits.get(id(client))
-        return res_time and res_time > datetime.now()
+class DashboardLogger(logging.Formatter):
+    """Custom color-coded formatter for the Interactive Dashboard."""
+    def format(self, record):
+        cat = record.levelname
+        colors = {
+            "INFO": C_CYAN, "SUCCESS": C_GREEN, "LIMIT": C_YELLOW + C_BOLD, 
+            "ERROR": C_RED, "FATAL": C_RED + C_BOLD, "AUTH": C_MAGENTA,
+            "TASK": C_BLUE + C_BOLD, "FILE": C_BLUE, "WAIT": C_YELLOW
+        }
+        color = colors.get(cat, C_RESET)
+        return f" {color}{C_BOLD}{cat:<8}{C_RESET} │ {record.getMessage()}"
 
-    @classmethod
-    def set_busy(cls, client, status=True):
-        if status: cls.busy_accounts.add(id(client))
-        else: cls.busy_accounts.discard(id(client))
+# Setup Custom Logging levels
+logging.addLevelName(25, "SUCCESS")
+logging.addLevelName(35, "LIMIT")
+logging.addLevelName(15, "AUTH")
+logging.addLevelName(16, "TASK")
+logging.addLevelName(17, "FILE")
+logging.addLevelName(18, "WAIT")
 
-    @classmethod
-    def find_best_account(cls, clients, preferred_idx=0):
-        """Finds the first available non-limited, non-busy account."""
-        # Try preferred first
-        indices = list(range(len(clients)))
-        start_pos = preferred_idx % len(clients)
-        ordered_indices = indices[start_pos:] + indices[:start_pos]
-        
-        for idx in ordered_indices:
-            c = clients[idx]
-            if not cls.is_limited(c) and id(c) not in cls.busy_accounts:
-                return c, idx
-        return None, -1
+logger = logging.getLogger("TwitterScraper")
+logger.setLevel(logging.DEBUG)
+sh = logging.StreamHandler()
+sh.setFormatter(DashboardLogger())
+logger.addHandler(sh)
 
-def log(msg, category="INFO"):
-    """Standardized logging."""
-    print(f"[{category}] {msg}")
+def log(msg: str, cat: str = "INFO"):
+    mappings = {"INFO": 20, "SUCCESS": 25, "LIMIT": 35, "ERROR": 40, "FATAL": 50, "AUTH": 15, "TASK": 16, "FILE": 17, "WAIT": 18}
+    logger.log(mappings.get(cat, 20), msg)
 
-def get_input(prompt, default=None, type_func=str):
-    msg = f"{prompt} (default {default}): " if default is not None else f"{prompt}: "
-    val = input(msg).strip()
+def print_header(title: str):
+    """Visual framed header for the dashboard modules."""
+    w = AppConfig.DASHBOARD_WIDTH
+    print(f"\n{C_BLUE}{'═'*w}{C_RESET}\n{C_BOLD}{C_CYAN}  {title:^{w-4}}  {C_RESET}\n{C_BLUE}{'═'*w}{C_RESET}")
+
+def get_input(prompt: str, default: Any = None, type_func: Callable = str) -> Any:
+    """Interactively gathers user input with validation and defaults."""
+    p = f"{C_BOLD}{C_CYAN}➤ {prompt}{C_RESET}" + (f" {C_YELLOW}({default}){C_RESET}: " if default is not None else ": ")
+    val = input(p).strip()
     if not val: return default
     try: return type_func(val)
-    except ValueError:
-        log(f"Invalid input. Using default {default}.", "WARN")
-        return default
+    except: return default
 
-def analyze_sentiment(text):
-    if not text: return "N/A"
-    try:
-        blob = TextBlob(text)
-        if blob.sentiment.polarity > 0: return "Positive"
-        if blob.sentiment.polarity < 0: return "Negative"
-        return "Neutral"
-    except Exception: return "Error"
+# =============================================================================
+# REGION: DATA PROCESSING LAYER
+# =============================================================================
 
-# -----------------------------------------------------------------------------
-# DATA HANDLING
-# -----------------------------------------------------------------------------
-
-def process_and_save(all_data, filepath):
-    """Calculates metadata and saves to CSV."""
-    if not all_data: return
-    if not filepath.lower().endswith('.csv'): filepath += '.csv'
+class DataEngine:
+    """Handles high-performance CSV operations and sentiment algorithms."""
     
-    # Calculate tweets_per_date
-    date_counts = Counter()
-    for row in all_data:
-        dt_str = str(row.get('datetime', ''))
-        # Standardize format
-        for fmt in ('%a %b %d %H:%M:%S %z %Y', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
-            try:
-                dt_obj = datetime.strptime(dt_str, fmt)
-                date_str = dt_obj.strftime('%Y-%m-%d')
-                row['datetime'] = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
-                row['_date_key'] = date_str
-                break
-            except Exception: continue
+    @staticmethod
+    def _path(p: str) -> str:
+        return p if p.lower().endswith('.csv') else p + '.csv'
+
+    @staticmethod
+    def analyze_sentiment(text: str) -> str:
+        """Returns a human-readable sentiment label for a given text."""
+        if not text: return "Neutral"
+        try:
+            pol = TextBlob(text).sentiment.polarity
+            if pol > 0.1: return "Positive"
+            if pol < -0.1: return "Negative"
+            return "Neutral"
+        except: return "Neutral"
+
+    @classmethod
+    def sync_to_disk(cls, data: List[Dict], path: str):
+        """Standardizes, counts, and saves a dataset to CSV."""
+        if not data: return
+        path = cls._path(path)
         
-        if '_date_key' not in row:
-            row['_date_key'] = dt_str[:10]
-        date_counts[row['_date_key']] += 1
+        # Calculate frequencies and normalize datetimes
+        date_map = Counter()
+        for row in data:
+            dt_raw = str(row.get('datetime', ''))
+            for fmt in ('%a %b %d %H:%M:%S %z %Y', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                try:
+                    obj = datetime.strptime(dt_raw, fmt)
+                    row['datetime'] = obj.strftime('%Y-%m-%d %H:%M:%S')
+                    row['_date_key'] = obj.strftime('%Y-%m-%d')
+                    break
+                except: continue
+            if '_date_key' not in row: row['_date_key'] = dt_raw[:10]
+            date_map[row['_date_key']] += 1
+            
+        for row in data:
+            row['tweets_per_date'] = date_map.get(row.pop('_date_key', ''), 0)
 
-    for row in all_data:
-        row['tweets_per_date'] = date_counts.get(row.get('_date_key'), 0)
-        if '_date_key' in row: del row['_date_key']
-
-    try:
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction='ignore')
-            writer.writeheader()
-            writer.writerows(all_data)
-        log(f"Saved {len(all_data)} records to {filepath}.", "FILE")
-    except Exception as e:
-        log(f"Save error: {e}", "ERROR")
-
-def load_data(filepath):
-    """Loads existing data from CSV."""
-    data, known_ids = [], set()
-    if not filepath.lower().endswith('.csv'): filepath += '.csv'
-    if os.path.exists(filepath):
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    data.append(row)
-                    if 'tweet_id' in row: known_ids.add(str(row['tweet_id']))
-            log(f"Loaded {len(data)} existing records.", "FILE")
-        except Exception as e: log(f"Load error: {e}", "ERROR")
-    return data, known_ids
+            with open(path, 'w', newline='', encoding='utf-8') as fs:
+                wr = csv.DictWriter(fs, fieldnames=AppConfig.FIELDNAMES, extrasaction='ignore')
+                wr.writeheader()
+                wr.writerows(data)
+            log(f"Successfully synced {len(data)} records to '{os.path.basename(path)}'", "FILE")
+        except Exception as e: log(f"Sync Failure: {e}", "ERROR")
 
-# -----------------------------------------------------------------------------
-# AUTHENTICATION
-# -----------------------------------------------------------------------------
+    @classmethod
+    def extract_ids(cls, path: str) -> Set[str]:
+        """Loads only tweet IDs into a set for high-speed deduplication."""
+        path = cls._path(path)
+        results = set()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as fs:
+                    for row in csv.DictReader(fs):
+                        if 'tweet_id' in row: results.add(str(row['tweet_id']))
+            except: pass
+        return results
 
-async def authenticate(client, cookies_file):
-    """Authenticates to Twitter using cookies or fresh login."""
-    if os.path.exists(cookies_file):
+    @classmethod
+    def load_full(cls, path: str) -> List[Dict]:
+        """Loads full records from disk, or returns an empty list if missing."""
+        path = cls._path(path)
+        if not os.path.exists(path): return []
         try:
-            client.load_cookies(cookies_file)
-            log(f"Loaded {os.path.basename(cookies_file)}.", "AUTH")
+            with open(path, 'r', encoding='utf-8') as fs: return list(csv.DictReader(fs))
+        except: return []
+
+# =============================================================================
+# REGION: ACCOUNT & WORKER POOL
+# =============================================================================
+
+class TwitterAccount:
+    """Manages an individual X account, its health, and its async lifecycle."""
+    __slots__ = ('idx', 'cookies_file', 'client', 'fails', 'resume_until', 'is_busy')
+
+    def __init__(self, idx: int, file: str):
+        self.idx = idx + 1
+        self.cookies_file = file
+        self.client = Client('en-US')
+        self.fails = 0
+        self.resume_until: Optional[datetime] = None
+        self.is_busy = False
+
+    async def __aenter__(self):
+        self.is_busy = True; return self
+
+    async def __aexit__(self, *exc):
+        self.is_busy = False
+
+    async def auth(self) -> bool:
+        """Authenticates using user-provided credentials or saved cookies."""
+        if os.path.exists(self.cookies_file):
+            log(f"Acct {self.idx}: Attempting cookie-based login...", "AUTH")
+            try:
+                self.client.load_cookies(self.cookies_file)
+                return True
+            except: pass
+
+        print("\n" + "-" * AppConfig.DASHBOARD_WIDTH)
+        print(f"{C_BOLD}{C_CYAN}ACTION REQUIRED: Twitter Authentication for Acct {self.idx}{C_RESET}")
+        print("Please enter your X credentials (saved as session cookies).")
+        print("-" * AppConfig.DASHBOARD_WIDTH)
+        
+        try:
+            u, e, p = input("  ? Username: "), input("  ? Email: "), input("  ? Password: ")
+            log("Communicating with X server...", "AUTH")
+            await self.client.login(auth_info_1=u, auth_info_2=e, password=p)
+            self.client.save_cookies(self.cookies_file)
+            log("Authentication Successful!", "AUTH")
             return True
-        except Exception: pass
+        except Exception as err:
+            log(f"Login failed: {err}", "ERROR")
+            if "403" in str(err): log("Cloudflare detected. Manual cookies mandatory.", "FATAL")
+            
+            print("\n  " + C_BOLD + "HOW TO GET MANUAL COOKIES:" + C_RESET)
+            print("  Login to Twitter.com -> DevTools (F12) -> Application -> Cookies")
+            at = input("  ? Enter auth_token: ").strip()
+            ct = input("  ? Enter ct0: ").strip()
+            if at and ct:
+                with open(self.cookies_file, 'w') as fs: json.dump({'auth_token': at, 'ct0': ct}, fs)
+                self.client.load_cookies(self.cookies_file)
+                log("Cookies applied successfully.", "AUTH")
+                return True
+        return False
 
-    log(f"Login required for {os.path.basename(cookies_file)}", "AUTH")
-    try:
-        u, e, p = input("User: "), input("Email: "), input("Pass: ")
-        await client.login(auth_info_1=u, auth_info_2=e, password=p)
-        client.save_cookies(cookies_file)
-        return True
-    except Exception as e:
-        log(f"Auto-login failed: {e}. Try manual cookies.", "WARN")
-        at, ct = input("auth_token: ").strip(), input("ct0: ").strip()
-        if at and ct:
-            with open(cookies_file, 'w') as f: json.dump({'auth_token': at, 'ct0': ct}, f)
-            client.load_cookies(cookies_file)
-            return True
-    return False
+    def trigger_cooldown(self, is_429: bool = False):
+        """Implements a tiered escalation cooldown for rate limits and errors."""
+        self.fails += 1
+        if is_429:
+            sec = 900 if self.fails == 1 else (1800 if self.fails == 2 else 3600)
+            reason = "Rate Limit"
+        else:
+            sec = AppConfig.COOLDOWN_TIERS[min(self.fails-1, len(AppConfig.COOLDOWN_TIERS)-1)]
+            reason = "Scrape Error"
+        
+        self.resume_until = datetime.now() + timedelta(seconds=sec)
+        log(f"Acct {self.idx} ({reason}): Cooldown {sec//60}m. Ready at {self.resume_until.strftime('%H:%M:%S')}", "LIMIT")
 
-# -----------------------------------------------------------------------------
-# SCRAPING ENGINE
-# -----------------------------------------------------------------------------
+    def available(self) -> bool:
+        """Returns True if the account is ready for work."""
+        return not self.is_busy and (not self.resume_until or self.resume_until < datetime.now())
 
-async def scrape_twitter_search(clients, start_idx, query, start_date=None, end_date=None, max_raw=50, known_ids=None, max_dup_pages=1):
-    """Core search logic with auto-swapping for rate limits and tiered retry."""
-    results, total_processed = [], 0
-    scraped_ids = set(known_ids) if known_ids else set()
-    consecutive_dup_pages = 0
+class WorkerPool:
+    """Manages a collection of Accounts to distribute scraping workload."""
+    def __init__(self, accs: List[TwitterAccount]): self.accs = accs
     
-    full_query = query
-    if start_date: full_query += f" since:{start_date}"
-    if end_date: full_query += f" until:{end_date}"
+    def lease_best(self, start_idx: int = 0) -> Tuple[Optional[TwitterAccount], int]:
+        """Finds and leases the next available account from the pool."""
+        total = len(self.accs)
+        for i in range(total):
+            idx = (start_idx + i) % total
+            acc = self.accs[idx]
+            if acc.available(): return acc, idx
+        return None, -1
 
-    curr_idx = start_idx
-    wait_level = 0
-    wait_delays = [60, 300, 1800] # 1m, 5m, 30m
+    async def stall_for_health(self):
+        """Pauses execution until at least one account recovers from cooldown."""
+        now = datetime.now()
+        waits = [int((a.resume_until - now).total_seconds()) for a in self.accs if a.resume_until and a.resume_until > now]
+        if waits:
+            d = min(waits) + 2
+            log(f"Exhausted healthy accounts. Stall initiated: {d} seconds...", "WAIT")
+            await asyncio.sleep(d)
 
-    while total_processed < max_raw:
-        client, active_idx = ScraperState.find_best_account(clients, curr_idx)
+# =============================================================================
+# REGION: SCRAPING LOGIC UNIT
+# =============================================================================
+
+@dataclass
+class ScrapeTask:
+    """Blueprint for a single scraping execution task."""
+    __slots__ = ('query', 'limit', 'ids', 'since', 'until', 'max_dup')
+    query: str; limit: int; ids: Set[str]
+    since: Optional[str]; until: Optional[str]; max_dup: int
+
+class ScrapingEngine:
+    """Robust processor for paginated Twitter search queries."""
+    
+    @classmethod
+    async def process(cls, pool: WorkerPool, pref_idx: int, t: ScrapeTask) -> Tuple[List[Dict], int]:
+        """Executes a search task with automatic rotation and state management."""
+        extracted, n, consecutive_dups, rotation_fails = [], 0, 0, 0
+        q_final = f"{t.query}{' since:'+t.since if t.since else ''}{' until:'+t.until if t.until else ''}"
         
-        if not client:
-            wait_time = wait_delays[min(wait_level, len(wait_delays)-1)]
-            log(f"All accounts limited. Waiting {wait_time//60}m...", "LIMIT")
-            await asyncio.sleep(wait_time)
-            wait_level += 1
-            continue
+        curr_idx = pref_idx
+        while n < t.limit:
+            acc, active_idx = pool.lease_best(curr_idx); curr_idx = active_idx
+            if not acc: 
+                await pool.stall_for_health(); continue
 
-        curr_idx = active_idx
-        ScraperState.set_busy(client, True)
-        log(f"Using Account {curr_idx+1} for '{query}'", "SEARCH")
-        
-        try:
-            try:
-                tweets = await client.search_tweet(full_query, 'Latest')
-            except Exception as e:
-                if '404' in str(e): tweets = await client.search_tweet(full_query, 'Top')
-                else: raise e
+            async with acc:
+                log(f"Acct {acc.idx} ➔ Analyzing: '{t.query}'", "INFO")
+                try:
+                    try: tws = await acc.client.search_tweet(q_final, 'Latest')
+                    except Exception as e:
+                        if '404' in str(e): tws = await acc.client.search_tweet(q_final, 'Top')
+                        else: raise e
 
-            while total_processed < max_raw and tweets:
-                batch_saw_new = False
-                for t in tweets:
-                    total_processed += 1
-                    if total_processed > max_raw: break
-                    
-                    if str(t.id) in scraped_ids:
-                        print(f"[{total_processed}] Duplicate @{t.user.screen_name}")
-                        continue
-                    
-                    scraped_ids.add(str(t.id))
-                    batch_saw_new = True
-                    results.append({
-                        "keyword": query, "tweet_id": t.id, "username": t.user.name,
-                        "handle": t.user.screen_name, "text": t.text.replace('\n', ' '),
-                        "sentiment": analyze_sentiment(t.text), "url": f"https://x.com/status/{t.id}",
-                        "datetime": t.created_at, "likes": t.favorite_count,
-                        "retweets": t.retweet_count, "replies": t.reply_count,
-                    })
-                    print(f"[{total_processed}] Scraped: @{t.user.screen_name} (New: {len(results)})")
+                    while len(extracted) < t.limit and tws:
+                        found_fresh = False
+                        for tweet in tws:
+                            t_id = str(tweet.id)
+                            if t_id in t.ids:
+                                log(f"Skip: @{tweet.user.screen_name:<16} │ Duplicate", "FILE")
+                                continue
+                            
+                            found_fresh = True; t.ids.add(t_id)
+                            n += 1 # Only count unique/new tweets
+                            if len(extracted) >= t.limit: break
+                            msg = tweet.text.replace('\n', ' ')
+                            extracted.append({
+                                "keyword": t.query, "tweet_id": tweet.id, "username": tweet.user.name, "handle": tweet.user.screen_name,
+                                "text": msg, "sentiment": DataEngine.analyze_sentiment(msg), "url": f"https://x.com/status/{tweet.id}",
+                                "datetime": tweet.created_at, "likes": tweet.favorite_count, "retweets": tweet.retweet_count, "replies": tweet.reply_count
+                            })
+                            log(f"+ Collected: @{tweet.user.screen_name:<15} │ Progress: {n}/{t.limit} │ New: {len(extracted)}", "SUCCESS")
 
-                if not batch_saw_new:
-                    consecutive_dup_pages += 1
-                    if consecutive_dup_pages >= max_dup_pages:
-                        log(f"Stopping search: reached {consecutive_dup_pages} consecutive duplicate-only pages.", "STOP")
+                        if not found_fresh:
+                            consecutive_dups += 1
+                            if consecutive_dups >= t.max_dup: 
+                                log(f"Search Saturation: {consecutive_dups} duplicate pages. Stopping task.", "WAIT")
+                                break
+                        else:
+                            consecutive_dups = 0; acc.fails = 0 # Reset health on success
+                        
+                        if n < t.limit:
+                            await asyncio.sleep(AppConfig.PAGINATION_SLEEP)
+                            tws = await tws.next()
+                    break
+                except Exception as ex:
+                    acc.trigger_cooldown(is_429=('429' in str(ex)))
+                    log(f"Acct {acc.idx} Scrape Failure: {ex}", "ERROR")
+                    curr_idx = (curr_idx + 1) % len(pool.accs)
+                    rotation_fails += 1
+                    if rotation_fails >= len(pool.accs) * 2:
+                        log("All accounts in pool reported critical failure. Aborting task.", "FATAL")
                         break
-                    log(f"No new tweets this page ({consecutive_dup_pages}/{max_dup_pages}). Trying next...", "INFO")
-                else:
-                    consecutive_dup_pages = 0 # reset on success
+                    continue
 
-                if total_processed < max_raw:
-                    await asyncio.sleep(1)
-                    tweets = await tweets.next()
-            
-            # Finished successfully or reached end of data
-            ScraperState.set_busy(client, False)
-            break
+        return extracted, n
 
-        except Exception as e:
-            ScraperState.set_busy(client, False)
-            error_msg = str(e)
-            
-            if '429' in error_msg:
-                log(f"Account {curr_idx+1} reached rate limit. Swapping...", "LIMIT")
-                ScraperState.mark_limited(client)
-            else:
-                log(f"Account {curr_idx+1} error: {e}", "ERROR")
-                # We also mark it as briefly limited to avoid immediate reuse if it's a connection/account issue
-                ScraperState.rate_limits[id(client)] = datetime.now() + timedelta(minutes=2)
-            
-            # Switch to next account context
-            curr_idx = (curr_idx + 1) % len(clients)
-            
-            # Safety: if we have already tried all accounts in this loop without any progress, stop.
-            if wait_level > len(clients): 
-                log(f"Critical error: All available accounts failed for '{query}'. Skipping task.", "FATAL")
-                break
-                
-            wait_level += 1 # repurposed as an error counter for this loop
-            await asyncio.sleep(2)
-            continue
+# =============================================================================
+# REGION: DASHBOARD APPLICATION
+# =============================================================================
 
-    return results, total_processed
+class AnalyticaDashboard:
+    """High-level controller for dashboard interactions and scrape orchestration."""
+    
+    def __init__(self, pool: WorkerPool):
+        self.pool = pool
+        self.is_running = True
+        signal.signal(signal.SIGINT, self.graceful_shutdown)
 
-# -----------------------------------------------------------------------------
-# HANDLERS
-# -----------------------------------------------------------------------------
+    def graceful_shutdown(self, *args):
+        """Ensures all data is flushed to disk before closing on SIGINT."""
+        self.is_running = False
+        print(f"\n{C_YELLOW}{C_BOLD}Shutdown pulse detected. Finalizing sync and closing console...{C_RESET}")
 
-async def run_search(clients, is_trending=False):
-    query = ""
-    if is_trending:
-        trends = await clients[0].get_trends('trending')
-        for i, t in enumerate(trends[:15], 1): print(f"{i}. {t.name}")
-        sel = get_input("Select trend #", "b")
-        if sel == 'b' or not sel.isdigit(): return
-        query = trends[int(sel)-1].name
-    else:
-        query = get_input("Enter search query")
-        if not query: return
+    async def custom_search(self, trends: bool = False):
+        """Module: Targeted search with date and volume tuning."""
+        print_header("REAL-TIME TREND DISCOVERY" if trends else "CUSTOM SEARCH MODULE")
+        q = ""
+        if trends:
+            results = await self.pool.accs[0].client.get_trends('trending')
+            for i, item in enumerate(results[:15], 1): print(f"  {i}. {item.name}")
+            sel = get_input("Select Trend #", "b")
+            if sel == 'b' or not str(sel).isdigit(): return
+            q = results[int(sel)-1].name
+        else:
+            q = get_input("Query String")
+            if not q: return
 
-    s, e = get_input("Start (YYYY-MM-DD)", ""), get_input("End (YYYY-MM-DD)", "")
-    mx = get_input("Max RAW tweets", 50, int)
-    max_dup = get_input("Max consecutive duplicate pages to follow", 3, int)
-    out = get_input("Filename", "scraped_tweets")
+        s, e = get_input("Since (YYYY-MM-DD)"), get_input("Until (YYYY-MM-DD)")
+        mx = get_input("Max Tweets to Collect", 50, int)
+        dup = get_input("Max Page Retries (if only duplicates)", 2, int)
+        f_name = get_input("Filename", "search_results")
 
-    data, ids = load_data(out)
-    new, raw = await scrape_twitter_search(clients, 0, query, s, e, mx, ids, max_dup)
-    if new: process_and_save(data + new, out)
-
-async def run_interval(clients):
-    query = get_input("Enter search query")
-    if not query: return
-    s_dt = datetime.strptime(get_input("Start (YYYY-MM-DD HH:MM:SS)"), "%Y-%m-%d %H:%M:%S")
-    e_dt = datetime.strptime(get_input("End (YYYY-MM-DD HH:MM:SS)"), "%Y-%m-%d %H:%M:%S")
-    h, j_m = get_input("Interval hours", 2.0, float), get_input("Jitter minutes", 30, int)
-    mx = get_input("Max RAW per interval", 20, int)
-    max_dup = get_input("Max consecutive duplicate pages to follow", 1, int)
-    out = get_input("Filename", "interval_tweets")
-
-    data, ids = load_data(out)
-    intervals = []
-    curr = s_dt
-    while curr < e_dt:
-        dur = timedelta(hours=h) + timedelta(minutes=random.randint(-j_m, j_m))
-        nxt = min(curr + max(timedelta(minutes=10), dur), e_dt)
-        intervals.append((curr, nxt))
-        curr = nxt + timedelta(seconds=1)
-
-    for i in range(0, len(intervals), len(clients)):
-        batch = intervals[i:i+len(clients)]
-        async def task(it, idx):
-            q_time = f"{query} since_time:{int(it[0].timestamp())} until_time:{int(it[1].timestamp())}"
-            log(f"Interval {it[0].strftime('%H:%M')} - {it[1].strftime('%H:%M')}", "TASK")
-            return await scrape_twitter_search(clients, idx % len(clients), q_time, max_raw=mx, known_ids=ids, max_dup_pages=max_dup)
+        known_ids = DataEngine.extract_ids(f_name)
+        log(f"Pre-scan: Loaded {len(known_ids)} known IDs for deduplication.", "FILE")
         
-        results = await asyncio.gather(*(task(it, j) for j, it in enumerate(batch)), return_exceptions=True)
-        for res in results:
-            if not isinstance(res, Exception) and res[0]:
-                data.extend(res[0])
-                for p in res[0]: ids.add(str(p['tweet_id']))
-        process_and_save(data, out)
-        if i + len(clients) < len(intervals): await asyncio.sleep(2)
+        new, _ = await ScrapingEngine.process(self.pool, 0, ScrapeTask(q, mx, known_ids, s, e, dup))
+        if new:
+            log(f"Merge: Integrating {len(new)} records into existing archive...", "TASK")
+            DataEngine.sync_to_disk(DataEngine.load_full(f_name) + new, f_name)
+        else:
+            log("Process closed: No unique data discovered.", "INFO")
 
-async def run_continuous(clients):
-    queries = [q.strip() for q in get_input("Queries (comma-separated)").split(',') if q.strip()]
-    target = get_input("Target RAW per query", 500, int)
-    wait_m, j_m = get_input("Wait minutes", 30.0, float), get_input("Jitter minutes", 5.0, float)
-    mx = get_input("Max RAW per run", 50, int)
-    max_dup = get_input("Max consecutive duplicate pages to follow", 1, int)
-    out = get_input("Filename", "continuous_tweets")
+    async def historical_interval(self):
+        """Module: Time-chunked historical reconstruction."""
+        print_header("HISTORICAL TIMELINE RECONSTRUCTION")
+        q = get_input("Keyword"); s_raw = get_input("Start (YYYY-MM-DD HH:MM:SS)"); e_raw = get_input("End (YYYY-MM-DD HH:MM:SS)")
+        if not all([q, s_raw, e_raw]): return
+        s_dt, e_dt = datetime.strptime(s_raw, "%Y-%m-%d %H:%M:%S"), datetime.strptime(e_raw, "%Y-%m-%d %H:%M:%S")
+        
+        hrs, jit = get_input("Chunk Size (Hrs)", 2.0, float), get_input("Chunk Jitter (Min)", 20, int)
+        mx, dup = get_input("Max/Chunk", 25, int), get_input("Max Page Retries", 1, int)
+        f_name = get_input("Filename", "history_archive")
 
-    data, ids = load_data(out)
-    prog = {q: sum(1 for r in data if r.get('keyword') == q) for q in queries}
-    log(f"Starting Continuous Mode. Target: {target}/query.", "START")
+        ids, data = DataEngine.extract_ids(f_name), DataEngine.load_full(f_name)
+        log(f"Resuming: Loaded {len(data)} records for '{q}'.", "FILE")
+        
+        timeline, cursor = [], s_dt
+        while cursor < e_dt:
+            delta = timedelta(hours=hrs) + timedelta(minutes=random.randint(-jit, jit))
+            end_t = min(cursor + max(timedelta(minutes=10), delta), e_dt)
+            timeline.append((cursor, end_t)); cursor = end_t + timedelta(seconds=1)
 
-    try:
-        while any(v < target for v in prog.values()):
-            pending = [q for q in queries if prog[q] < target]
-            for i in range(0, len(pending), len(clients)):
-                batch = pending[i:i+len(clients)]
-                async def task(q, idx):
-                    return await scrape_twitter_search(clients, idx % len(clients), q, max_raw=min(mx, target-prog[q]), known_ids=ids, max_dup_pages=max_dup)
-                
-                results = await asyncio.gather(*(task(q, j) for j, q in enumerate(batch)), return_exceptions=True)
-                for j, res in enumerate(results):
-                    q = batch[j]
-                    if not isinstance(res, Exception):
-                        prog[q] += res[1]
-                        if res[0]:
-                            data.extend(res[0])
-                            for p in res[0]: ids.add(str(p['tweet_id']))
-                process_and_save(data, out)
+        log(f"Planner: {len(timeline)} time-chunks scheduled for processing.", "TASK")
+        for i in range(0, len(timeline), len(self.pool.accs)):
+            if not self.is_running: break
+            tasks = timeline[i : i + len(self.pool.accs)]
             
-            slp = max(0.5, wait_m + random.uniform(-j_m, j_m))
-            log(f"Sweep complete. Next in {slp:.2f}m...", "WAIT")
-            await asyncio.sleep(int(slp * 60))
-    except KeyboardInterrupt: log("Stopped.", "INFO")
+            async def chunk_runner(its, off):
+                t_q = f"{q} since_time:{int(its[0].timestamp())} until_time:{int(its[1].timestamp())}"
+                log(f"Running Task: {its[0].strftime('%H:%M')} ➔ {its[1].strftime('%H:%M')}", "TASK")
+                return await ScrapingEngine.process(self.pool, off, ScrapeTask(t_q, mx, ids, None, None, dup))
 
-# -----------------------------------------------------------------------------
-# MAIN
-# -----------------------------------------------------------------------------
+            results = await asyncio.gather(*(chunk_runner(it, j) for j, it in enumerate(tasks)), return_exceptions=True)
+            for res in results:
+                if not isinstance(res, Exception) and res[0]: data.extend(res[0])
+            DataEngine.sync_to_disk(data, f_name)
+            if i + len(self.pool.accs) < len(timeline): await asyncio.sleep(2)
+
+    async def continuous_poll(self):
+        """Module: Persistent keyword infrastructure monitoring."""
+        print_header("REAL-TIME CONTINUOUS POLLING")
+        q_list = [x.strip() for x in get_input("Keywords (comma-sep)").split(',') if x.strip()]
+        goal, wait = get_input("Goal/Query", 500, int), get_input("Sweep Interval (min)", 20.0, float)
+        f_name = get_input("Filename", "polling_live")
+
+        data, ids = DataEngine.load_full(f_name), DataEngine.extract_ids(f_name)
+        stats = {q: sum(1 for r in data if r.get('keyword') == q) for q in q_list}
+
+        try:
+            while self.is_running and any(v < goal for v in stats.values()):
+                worklist = [q for q in q_list if stats[q] < goal]
+                for i in range(0, len(worklist), len(self.pool.accs)):
+                    chunk = worklist[i : i + len(self.pool.accs)]
+                    results = await asyncio.gather(*(ScrapingEngine.process(self.pool, j, 
+                        ScrapeTask(q, mx_swp, ids, None, None, dup)) for j, q in enumerate(chunk)))
+                    
+                    for k, res in enumerate(results):
+                        stats[chunk[k]] += res[1]; data.extend(res[0])
+                    DataEngine.sync_to_disk(data, f_name)
+                
+                log(f"Sequence complete. Next pulse in {wait}m...", "WAIT")
+                await asyncio.sleep(int(wait * 60))
+        except KeyboardInterrupt: pass
+
+    async def add_new_account(self):
+        """Module: On-demand account pool expansion."""
+        print_header("ACCOUNT REGISTRATION")
+        root = os.path.dirname(os.path.abspath(__file__))
+        idx = len(self.pool.accs) + 1
+        while any(os.path.basename(a.cookies_file) == f"twitter_cookies_{idx}.json" for a in self.pool.accs): idx += 1
+        name = os.path.join(root, f"twitter_cookies_{idx if idx > 1 else ''}.json")
+        if idx == 1: name = os.path.join(root, "twitter_cookies.json")
+        
+        acc = TwitterAccount(len(self.pool.accs), name)
+        if await acc.auth(): self.pool.accs.append(acc); log(f"Acct {acc.idx} integrated.", "AUTH")
+
+# =============================================================================
+# REGION: ENTRY POINT
+# =============================================================================
 
 async def main():
-    path = os.path.dirname(os.path.abspath(__file__))
-    f_cookies = sorted(glob.glob(os.path.join(path, 'twitter_cookies*.json')))
-    clients = []
+    root = os.path.dirname(os.path.abspath(__file__))
+    files = sorted(glob.glob(os.path.join(root, 'twitter_cookies*.json')))
+    accounts = []
     
-    for f in f_cookies:
-        c = Client('en-US')
-        if await authenticate(c, f): clients.append(c)
+    for i, f in enumerate(files):
+        acc = TwitterAccount(i, f)
+        if await acc.auth(): accounts.append(acc)
     
-    while not clients or input(f"Loaded {len(clients)} counts. Add? (y/n): ").lower() == 'y':
-        idx = 1
-        while os.path.exists(os.path.join(path, f'twitter_cookies_{idx}.json')): idx += 1
-        f = os.path.join(path, f'twitter_cookies_{idx if idx > 1 else ""}.json')
-        if idx == 1: f = os.path.join(path, 'twitter_cookies.json')
-        c = Client('en-US')
-        if await authenticate(c, f): clients.append(c)
-        else: break
-
+    dash = AnalyticaDashboard(WorkerPool(accounts))
     MENU = {
-        "1": ("Search", lambda: run_search(clients)),
-        "2": ("Trends", lambda: run_search(clients, True)),
-        "3": ("Intervals", lambda: run_interval(clients)),
-        "4": ("Continuous", lambda: run_continuous(clients)),
-        "0": ("Quit", None)
+        "1": ("Custom Search", "Targeted query with specific date filters.", dash.custom_search),
+        "2": ("Trends Pick", "Discover top trends and start scraping.", lambda: dash.custom_search(trends=True)),
+        "3": ("Historical Int", "Deep history reconstruction via time-chunks.", dash.historical_interval),
+        "4": ("Continuous Poll", "Sustained keyword infrastructure monitoring.", dash.continuous_poll),
+        "5": ("Link Account", "Authenticate a fresh Twitter identity.", dash.add_new_account),
+        "0": ("Exit Console", "Safely power down all scraping operations.", None)
     }
 
-    while True:
-        print("\n=== TWITTER SCRAPER v2.0 ===")
-        for k, v in MENU.items(): print(f"{k}. {v[0]}")
-        ch = input("\nSelect: ").strip()
-        if ch == '0': break
-        if ch in MENU: await MENU[ch][1]()
+    while dash.is_running:
+        print(f"\n{C_BOLD}{C_CYAN}    TWITTER ANALYTICA DASHBOARD v1.0{C_RESET}")
+        print(f"{C_BLUE}{'─'*AppConfig.DASHBOARD_WIDTH}{C_RESET}")
+        for k, (n, d, _) in MENU.items():
+            print(f"  {C_YELLOW}[{k}]{C_RESET} {C_BOLD}{n:<18}{C_RESET} {C_CYAN}➔{C_RESET} {d}")
+        print(f"{C_BLUE}{'─'*AppConfig.DASHBOARD_WIDTH}{C_RESET}")
+        
+        ch = get_input("SELECT ACTION")
+        if ch == '0' or str(ch).lower() == 'q': break
+        if ch in MENU: await MENU[ch][2]()
 
 if __name__ == "__main__":
     try: asyncio.run(main())
-    except KeyboardInterrupt: print("\nExit.")
+    except KeyboardInterrupt: pass
+    except Exception as e: log(f"System halt: {e}", "FATAL")
