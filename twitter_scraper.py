@@ -52,6 +52,18 @@ class AppConfig:
 # REGION: CORE INITIALIZATION
 # =============================================================================
 
+class AppState:
+    STOP_REQUESTED = False
+
+def _interupt_handler(signum, frame):
+    if AppState.STOP_REQUESTED:
+        print("\n\033[0;31m[FATAL]\033[0m Forced Exit.")
+        os._exit(1)
+    print("\n\033[0;33m[WAIT]\033[0m Interrupt detected! Gracefully saving data and wrapping up tasks... (Press Ctrl+C again to force exit)")
+    AppState.STOP_REQUESTED = True
+
+signal.signal(signal.SIGINT, _interupt_handler)
+
 def init_twikit_patch():
     """Applies necessary monkey patches to twikit to bypass recent API changes."""
     try:
@@ -227,21 +239,38 @@ class TwitterAccount:
 
     async def auth(self) -> bool:
         """Handles automated JSON cookie loading or manual extraction flows."""
+        prev_auth = None
         if os.path.exists(self.cookies_file):
+            try:
+                with open(self.cookies_file, 'r') as f:
+                    c_data = json.load(f)
+                    if isinstance(c_data, dict) and 'auth_token' in c_data:
+                        prev_auth = c_data['auth_token']
+            except: pass
+            
             log(f"Acct {self.idx}: Validating saved session...", "AUTH")
             try:
                 self.client.load_cookies(self.cookies_file)
+                log(f"Acct {self.idx}: Testing API connection...", "WAIT")
+                await self.client.search_tweet('test', 'Latest', count=1)
+                log(f"Acct {self.idx}: ACTIVE (API OK)", "SUCCESS")
                 return True
             except Exception as e:
-                log(f"Acct {self.idx}: Session corrupt ({e}). Requires re-auth.", "ERROR")
+                log(f"Acct {self.idx}: INACTIVE or INVALID ({e}). Requires re-auth.", "ERROR")
 
         print("\n" + "-" * AppConfig.DASHBOARD_WIDTH)
         print(f"{Theme.BOLD}{Theme.CYAN}SECURITY ALERT: Authentication Required | Account {self.idx}{Theme.RESET}")
-        print("Please enter your X credentials to inject standard cookies.")
+        if prev_auth:
+            masked = f"{prev_auth[:8]}...{prev_auth[-8:]}" if len(prev_auth) > 16 else prev_auth
+            print(f"  {Theme.YELLOW}Previous auth_token: {masked}{Theme.RESET}")
+        print("Please enter your X credentials to inject standard cookies. (Press Enter on Username to skip)")
         print("-" * AppConfig.DASHBOARD_WIDTH)
         
         try:
-            u = input(f"{Theme.BOLD}? Username (Handle): {Theme.RESET}")
+            u = input(f"{Theme.BOLD}? Username (Handle): {Theme.RESET}").strip()
+            if not u:
+                log(f"Skipping Account {self.idx}.", "WAIT")
+                return False
             e = input(f"{Theme.BOLD}? Email: {Theme.RESET}")
             p = input(f"{Theme.BOLD}? Password: {Theme.RESET}")
             
@@ -257,16 +286,23 @@ class TwitterAccount:
             else:
                 log(f"Automated login failed: {err_msg}", "ERROR")
             
-            print("\n  " + Theme.BOLD + "MANUAL COOKIE INJECTION PROTOCOL:" + Theme.RESET)
+            print("\n  " + Theme.BOLD + "MANUAL COOKIE INJECTION PROTOCOL (Press Enter on auth_token to skip):" + Theme.RESET)
             print("  1. Login to Twitter.com in your browser")
             print("  2. Open DevTools (F12) -> Application Tab -> Cookies")
             at = input(f"{Theme.BOLD}  ? Paste 'auth_token': {Theme.RESET}").strip()
+            if not at:
+                log(f"Skipping Account {self.idx}.", "WAIT")
+                return False
             ct = input(f"{Theme.BOLD}  ? Paste 'ct0': {Theme.RESET}").strip()
             if at and ct:
                 with open(self.cookies_file, 'w') as fs: json.dump({'auth_token': at, 'ct0': ct}, fs)
-                self.client.load_cookies(self.cookies_file)
-                log("Cookies hardcoded and validated.", "SUCCESS")
-                return True
+                try:
+                    self.client.load_cookies(self.cookies_file)
+                    await self.client.search_tweet('test', 'Latest', count=1)
+                    log("Cookies hardcoded and validated. ACTIVE.", "SUCCESS")
+                    return True
+                except Exception as e:
+                    log(f"Provided cookies failed validation: {e}", "ERROR")
         return False
 
     def trigger_cooldown(self, is_429: bool = False):
@@ -332,6 +368,9 @@ class ScrapingEngine:
         curr_idx = pref_idx
         try:
             while len(extracted) < t.limit:
+                if AppState.STOP_REQUESTED:
+                    log("Interrupt flag active. Concluding search loop prematurely.", "WAIT")
+                    break
                 acc, active_idx = pool.lease_best(curr_idx); curr_idx = active_idx
                 if not acc: 
                     await pool.stall_for_health(); continue
@@ -376,11 +415,16 @@ class ScrapingEngine:
                                 consecutive_dups = 0; acc.fails = 0 # Reward healthy progress
                             
                             if len(extracted) < t.limit:
+                                if AppState.STOP_REQUESTED: break
                                 await asyncio.sleep(AppConfig.PAGINATION_SLEEP)
                                 tws = await tws.next()
                         break
                         
                     except Exception as ex:
+                        if '404' in str(ex):
+                            log("Search index empty or unavailable (404). Concluding segment.", "WAIT")
+                            break
+                            
                         acc.trigger_cooldown(is_429=('429' in str(ex)))
                         log(f"Connection Fault [Node {acc.idx}]: {ex}", "ERROR")
                         curr_idx = (curr_idx + 1) % len(pool.accs)
@@ -409,6 +453,7 @@ class AnalyticaDashboard:
 
     async def custom_search(self, trends: bool = False):
         """Module: Targeted semantic searches and trend parsing."""
+        AppState.STOP_REQUESTED = False
         print_header("REAL-TIME TREND DISCOVERY" if trends else "CUSTOM SEARCH MODULE")
         q = ""
         if trends:
@@ -439,6 +484,7 @@ class AnalyticaDashboard:
 
     async def historical_interval(self):
         """Module: Reconstructs high-density datasets using chunked intervals."""
+        AppState.STOP_REQUESTED = False
         print_header("HISTORICAL TIMELINE RECONSTRUCTION")
         q = get_input("Target Keyword")
         s_raw = get_input("Start Node (YYYY-MM-DD HH:MM:SS)")
@@ -467,7 +513,7 @@ class AnalyticaDashboard:
 
         log(f"Planner Active: Architecture generated for {len(timeline)} time-slices.", "TASK")
         for i in range(0, len(timeline), len(self.pool.accs)):
-            if not self.is_running: break
+            if not self.is_running or AppState.STOP_REQUESTED: break
             tasks = timeline[i : i + len(self.pool.accs)]
             
             async def chunk_runner(its, off):
@@ -484,6 +530,7 @@ class AnalyticaDashboard:
 
     async def continuous_poll(self):
         """Module: Persistent surveillance over specific infrastructure keywords."""
+        AppState.STOP_REQUESTED = False
         print_header("REAL-TIME PERSISTENT MONITORING")
         q_list = [x.strip() for x in get_input("Infrastructure Tags (comma-sep)").split(',') if x.strip()]
         goal, wait = get_input("Saturation/Tag", 500, int), get_input("Pulse Interval (min)", 20.0, float)
@@ -495,9 +542,10 @@ class AnalyticaDashboard:
         stats = {q: sum(1 for r in data if r.get('keyword') == q) for q in q_list}
 
         try:
-            while self.is_running and any(v < goal for v in stats.values()):
+            while self.is_running and any(v < goal for v in stats.values()) and not AppState.STOP_REQUESTED:
                 worklist = [q for q in q_list if stats[q] < goal]
                 for i in range(0, len(worklist), len(self.pool.accs)):
+                    if AppState.STOP_REQUESTED: break
                     chunk = worklist[i : i + len(self.pool.accs)]
                     results = await asyncio.gather(*(ScrapingEngine.process(self.pool, j, 
                         ScrapeTask(q, mx_swp, ids, None, None, dup)) for j, q in enumerate(chunk)))
@@ -506,9 +554,12 @@ class AnalyticaDashboard:
                         stats[chunk[k]] += res[1]; data.extend(res[0])
                     DataEngine.sync_to_disk(data, f_name)
                 
+                if AppState.STOP_REQUESTED: break
                 log(f"Pulse Wave Complete. Hibernate requested for {wait}m...", "WAIT")
                 try:
-                    await asyncio.sleep(int(wait * 60))
+                    for _ in range(int(wait * 60)):
+                        if AppState.STOP_REQUESTED: break
+                        await asyncio.sleep(1)
                 except KeyboardInterrupt:
                     log("Hibernation interrupted. Returning to main console.", "WARNING")
                     break
