@@ -16,12 +16,13 @@ export const getCsvHeaders = async (file: File) => {
   return response.data;
 };
 
-export const processTfidf = async (file: File, textColumn: string) => {
+export const processGsdmm = async (file: File, textColumn: string, numTopics: number = 15) => {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('text_column', textColumn);
+  formData.append('num_topics', numTopics.toString());
   
-  const response = await api.post('/process-tfidf/', formData, {
+  const response = await api.post('/process-gsdmm/', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
   });
   return response.data;

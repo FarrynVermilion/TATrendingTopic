@@ -249,14 +249,24 @@ class TwitterAccount:
             except: pass
             
             log(f"Acct {self.idx}: Validating saved session...", "AUTH")
-            try:
-                self.client.load_cookies(self.cookies_file)
-                log(f"Acct {self.idx}: Testing API connection...", "WAIT")
-                await self.client.search_tweet('test', 'Latest', count=1)
-                log(f"Acct {self.idx}: ACTIVE (API OK)", "SUCCESS")
-                return True
-            except Exception as e:
-                log(f"Acct {self.idx}: INACTIVE or INVALID ({e}). Requires re-auth.", "ERROR")
+            while True:
+                try:
+                    self.client.load_cookies(self.cookies_file)
+                    log(f"Acct {self.idx}: Testing API connection...", "WAIT")
+                    await self.client.search_tweet('test', 'Latest', count=1)
+                    log(f"Acct {self.idx}: ACTIVE (API OK)", "SUCCESS")
+                    return True
+                except Exception as e:
+                    log(f"Acct {self.idx}: INACTIVE or INVALID ({e}). Requires re-auth.", "ERROR")
+                    
+                    ans = get_input(f"Account {self.idx}: (r)etry test, (y)es re-auth, or (n)o skip? (r/y/n)", "y")
+                    ans_lower = str(ans).lower()
+                    if ans_lower == 'r':
+                        continue
+                    elif ans_lower != 'y':
+                        log(f"Skipping re-auth for Account {self.idx}.", "WAIT")
+                        return False
+                    break
 
         print("\n" + "-" * AppConfig.DASHBOARD_WIDTH)
         print(f"{Theme.BOLD}{Theme.CYAN}SECURITY ALERT: Authentication Required | Account {self.idx}{Theme.RESET}")
@@ -518,7 +528,7 @@ class AnalyticaDashboard:
             
             async def chunk_runner(its, off):
                 t_q = f"{q} since_time:{int(its[0].timestamp())} until_time:{int(its[1].timestamp())}"
-                log(f"Executing Node: {its[0].strftime('%H:%M')} ➔ {its[1].strftime('%H:%M')}", "TASK")
+                log(f"Executing Node: {its[0].strftime('%Y-%m-%d %H:%M')} ➔ {its[1].strftime('%Y-%m-%d %H:%M')}", "TASK")
                 return await ScrapingEngine.process(self.pool, off, ScrapeTask(t_q, mx, ids, None, None, dup))
 
             results = await asyncio.gather(*(chunk_runner(it, j) for j, it in enumerate(tasks)), return_exceptions=True)

@@ -7,15 +7,19 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'column-selected', column: string): void
+  (e: 'column-selected', payload: { column: string; numTopics: number }): void
   (e: 'back'): void
 }>()
 
 const selected = ref(props.headers[0] || '')
+const numTopics = ref(15)
 
 const proceed = () => {
   if (selected.value) {
-    emit('column-selected', selected.value)
+    emit('column-selected', {
+      column: selected.value,
+      numTopics: numTopics.value
+    })
   }
 }
 </script>
@@ -30,27 +34,48 @@ const proceed = () => {
         </svg>
         {{ filename }}
       </div>
-      <h2 class="text-2xl font-bold text-slate-800">Select Text Column</h2>
-      <p class="text-slate-500 mt-2">Which column contains the text to analyze?</p>
+      <h2 class="text-2xl font-bold text-slate-800">Configure Analysis</h2>
+      <p class="text-slate-500 mt-2">Select a text column and set topic parameters.</p>
     </div>
 
     <div class="w-full max-w-md space-y-6">
       
-      <div class="relative">
-        <select 
-          v-model="selected"
-          class="block w-full pl-4 pr-10 py-3 text-base border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-xl appearance-none bg-white shadow-sm transition-shadow hover:shadow-md"
-        >
-          <option disabled value="">Please select one</option>
-          <option v-for="header in headers" :key="header" :value="header">
-            {{ header }}
-          </option>
-        </select>
-        <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-slate-500">
-          <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-          </svg>
+      <!-- Text Column Selector -->
+      <div>
+        <label class="block text-sm font-medium text-slate-700 mb-2">Text Column</label>
+        <div class="relative">
+          <select 
+            v-model="selected"
+            class="block w-full pl-4 pr-10 py-3 text-base border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-xl appearance-none bg-white shadow-sm transition-shadow hover:shadow-md"
+          >
+            <option disabled value="">Please select one</option>
+            <option v-for="header in headers" :key="header" :value="header">
+              {{ header }}
+            </option>
+          </select>
+          <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-slate-500">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+            </svg>
+          </div>
         </div>
+      </div>
+
+      <!-- Number of Topics Input -->
+      <div>
+        <label class="block text-sm font-medium text-slate-700 mb-2">Number of Topics (K)</label>
+        <div class="flex items-center gap-4">
+          <input 
+            v-model.number="numTopics"
+            type="number"
+            min="2"
+            max="50"
+            class="block w-full pl-4 pr-4 py-3 text-base border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-xl bg-white shadow-sm transition-shadow hover:shadow-md"
+          />
+        </div>
+        <p class="mt-1.5 text-xs text-slate-400">
+          Maximum number of topics to discover (2–50). The algorithm may find fewer if clusters are empty.
+        </p>
       </div>
 
       <div class="flex gap-4 w-full pt-4">
@@ -65,7 +90,7 @@ const proceed = () => {
           :disabled="!selected"
           class="flex-1 px-4 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform hover:-translate-y-0.5"
         >
-          Analyze Data
+          Run Topic Modeling
         </button>
       </div>
       
