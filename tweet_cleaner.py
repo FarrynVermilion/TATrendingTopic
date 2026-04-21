@@ -46,11 +46,67 @@ SLANG_DICT = {
     "gmn": "bagaimana",
     "sm": "sama",
     "tll": "terlalu",
+    "utk": "untuk",
+    "skrg": "sekarang",
+    "mrk": "mereka",
+    "dg": "dengan",
+    "jgn": "jangan",
+    "sbg": "sebagai",
+    "gt": "begitu",
+    "gk": "tidak",
+    "msh": "masih",
+    "spt": "seperti",
+    "lg": "lagi",
+    "bkn": "bukan",
+    "lbh": "lebih",
+    "kpd": "kepada",
+    "ttg": "tentang",
+    "thn": "tahun",
+    "hrs": "harus",
+    "mmg": "memang",
+    "knp": "kenapa",
+    "byk": "banyak",
+    "kyk": "kayak",
+    "ttp": "tetap",
+    "sdg": "sedang",
+    "kl": "kalau",
+    "sblm": "sebelum",
+    "bln": "bulan",
+    "liat": "lihat",
+    "bilang": "cakap",
+    "bikin": "buat",
+    "tau": "tahu",
+    # Name Normalization
+    "as": "amerika",
+    "usa": "amerika",
+    "us": "amerika",
+    "paman sam": "amerika",
 }
 
-# Additional Twitter-specific noise to remove
+# Additional Twitter-specific noise and Entity Blacklist (Names, Locations, Orgs)
 ADDITIONAL_STOPWORDS = {
-    'rt', 'via', 'dm', 'cc', 'id', 'user', 'tweet', 'retweet', 'amp'
+    # Noise
+    'rt', 'via', 'dm', 'cc', 'id', 'user', 'tweet', 'retweet', 'amp',
+    'wkwk', 'wkwkwk', 'deh', 'sih', 'dong', 'kok', 'lah', 'kah',
+    
+    # Locations (Countries/Regions/Cities)
+    'iran', 'israel', 'amerika', 'as', 'usa', 'us', 'indonesia', 'indo',
+    'arab', 'saudi', 'rusia', 'china', 'palestina', 'gaza', 'lebanon', 
+    'syiria', 'yaman', 'houthi', 'teheran', 'tel', 'aviv', 'yerusalem', 
+    'washington', 'jakarta', 'barat', 'timur', 'tengah', 'selat', 'hormuz',
+    'teluk', 'negara', 'dunia', 'global',
+    
+    # People (Politicians/Leaders)
+    'trump', 'donald', 'netanyahu', 'khamenei', 'biden', 'putin', 
+    'jokowi', 'prabowo', 'sby', 'bibi',
+    
+    # Organizations/Others
+    'pbb', 'nato', 'zionis', 'yahudi', 'islam', 'syiah', 'sunni'
+}
+
+# AI/Bot account blacklist
+USER_BLACKLIST = {
+    'grok', 'chatgpt', 'bot'
 }
 
 
@@ -79,16 +135,26 @@ class TweetCleaner:
         # 5. Remove "RT" prefix
         text = re.sub(r'^rt\s+', '', text)
         
-        # 6. Remove Special Characters, Punctuation, and Emojis
-        text = re.sub(r'[^\w\s]', ' ', text)
+        # 6. Handle HTML entities like &amp;
+        text = re.sub(r'&amp;?|&lt;?|&gt;?', ' ', text)
         
-        # 7. Remove Numbers
+        # 7. Remove URLs (secondary check for shortened links)
+        text = re.sub(r't\.co/\w+', '', text)
+        
+        # 8. Remove Emojis and Non-ASCII (more aggressive)
+        text = text.encode('ascii', 'ignore').decode('ascii')
+        
+        # 9. Remove Special Characters and Punctuation
+        # This replaces everything except letters, numbers, and spaces with a space
+        text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
+        
+        # 10. Remove Numbers
         text = re.sub(r'\d+', '', text)
         
-        # 8. Remove repeated characters (e.g., bangeeeet -> banget)
+        # 11. Remove repeated characters (e.g., bangeeeet -> banget)
         text = re.sub(r'(\w)\1{2,}', r'\1', text)
         
-        # 9. Split into tokens
+        # 12. Split into tokens
         tokens = text.split()
         
         # 10. Normalize Slang and Remove Twitter noise (RT, via, etc.)
@@ -164,6 +230,17 @@ def main():
     print("[*] Initializing cleaner (this may take a moment)...")
     cleaner = TweetCleaner(use_stemming=not args.no_stem)
     
+    print("[*] Filtering out blacklisted users (AI/Bots)...")
+    initial_rows = len(df)
+    # Check if handle or username columns exist before filtering
+    for col in ['handle', 'username']:
+        if col in df.columns:
+            df = df[~df[col].astype(str).str.lower().isin(USER_BLACKLIST)]
+            
+    filtered_rows = len(df)
+    if initial_rows != filtered_rows:
+        print(f"[*] Removed {initial_rows - filtered_rows} tweets from blacklisted accounts.")
+
     print("[*] Cleaning tweets...")
     # Progress indicator for large datasets
     total = len(df)
