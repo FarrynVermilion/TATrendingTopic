@@ -18,7 +18,19 @@ import numpy as np
 import pandas as pd
 from collections import Counter
 from copy import deepcopy
-from .tfidf_utils import preprocess_tweet
+
+def preprocess_tweet(tweet):
+    """
+    Assume the tweet is already pre-cleaned and tokenized by the offline script.
+    Simply splits the string by whitespace to get the list of tokens.
+    """
+    if not isinstance(tweet, str):
+        return []
+    
+    # Split by whitespace and filter out empty strings
+    tokens = [t for t in tweet.split() if t]
+    return tokens
+
 
 
 class MovieGroupProcess:
@@ -345,7 +357,9 @@ class MovieGroupProcess:
 
 def process_csv_gsdmm(file_obj, text_column, K=15, n_iters=20):
     """
-    Process a CSV file and run GSDMM topic modeling with step-by-step logs.
+    Process a CSV file and run GSDMM topic modeling.
+    Note: This function now expects the 'text_column' to already be pre-cleaned 
+    (tokenized words separated by spaces).
 
     Returns
     -------
