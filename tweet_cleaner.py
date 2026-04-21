@@ -4,6 +4,8 @@ from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 import argparse
 import sys
+import multiprocessing
+from functools import partial
 
 # Common Indonesian Slang Mapping (Kamus Alay)
 SLANG_DICT = {
@@ -81,27 +83,203 @@ SLANG_DICT = {
     "usa": "amerika",
     "us": "amerika",
     "paman sam": "amerika",
+    "amrik": "amerika",
+    "isriwil": "israel",
+    "weyhh": "",
+    "smp": "sampai",
+    "bt": "buat",
+    "bbrp": "beberapa",
+    "gausa": "tidak usah",
+    "pas": "saat",
+    "udh": "sudah",
+    "monmaap": "maaf",
+    "adlhenghasilkannpemimpin": "adalah menghasilkan pemimpin",
+    "sma": "sama",
+    "smua": "semua",
+    "pst": "pasti",
+    "trmasuk": "termasuk",
+    "pnting": "penting",
+    "tuju": "setuju",
+    "keinget": "ingat",
+    "tmn": "teman",
+    "nyerang": "serang",
+    "nyari": "cari",
+    "nyoba": "coba",
+    "ngasih": "kasih",
+    "ngomong": "omong",
+    "nulis": "tulis",
+    "resiko": "risiko",
+    "colong": "curi",
+    "gin": "begini",
+    "dorg": "mereka",
+    "tpi": "tapi",
+    "akn": "akan",
+    "bnyk": "banyak",
+    "sgt": "sangat",
+    "kdg": "kadang",
+    "blm": "belum",
+    "blom": "belum",
+    "tntu": "tentu",
+    "bsa": "bisa",
+    "jga": "juga",
+    "nak": "hendak",
+    "tadi": "tadi",
+    "nanti": "nanti",
+    "skrg": "sekarang",
+    "sekrang": "sekarang",
+    "ngebantu": "bantu",
+    "maen": "main",
+    "berantem": "gaduh",
+    "gimana": "bagaimana",
+    "kayak": "seperti",
+    "kyk": "seperti",
+    "banget": "sangat",
+    "bgt": "sangat",
+    "drmana": "darimana",
+    "ape": "apa",
+    "yah": "ya",
+    "emang": "memang",
+    "thd": "terhadap",
+    "bhw": "bahwa",
+    "drpd": "daripada",
+    "mcm": "macam",
+    "pdhl": "padahal",
+    "dn": "dan",
+    "mulu": "selalu",
+    "nangkis": "tangkis",
+    "gera": "gerak",
+    "belaj": "belah",
+    "eror": "error",
+    "seneng": "senang",
+    "dipake": "pakai",
+    "dapet": "dapat",
+    "nindas": "tindas",
+    "ngga": "tidak",
+    "nggak": "tidak",
+    "gaperlu": "tidak perlu",
+    "gakda": "tidak ada",
+    "karna": "karena",
+    "gitu": "begitu",
+    "gini": "begitu",
+    "mw": "mau",
+    "mo": "mau",
+    "skrng": "sekarang",
+    "br": "baru",
+    "sono": "sana",
+    "rmh": "rumah",
+    "ksh": "kasih",
+    "mreka": "mereka",
+    "krena": "karena",
+    "mslaj": "masalah",
+    "mrrka": "mereka",
+    "koq": "kok",
+    "pny": "punya",
+    "israhell": "israel",
+    "nargetin": "target",
+    "nyitakin": "nyata",
+    "nebar": "tebar",
+    "sorga": "surga",
+    "anjimg": "anjing",
+    "mgkn": "mungkin",
+    "smakin": "semakin",
+    "tu": "itu",
+    "tuh": "itu",
+    "bacot": "bicara",
+    "ngapain": "apa",
+    "ngemis": "minta",
+    "tolol": "bodoh",
+    "goblok": "bodoh",
+    "anjimg": "anjing",
+    "bangsat": "jahat",
+    "syuriah": "syria",
+    "venesvela": "venezuela",
+    "venesule": "venezuela",
+    "tak": "tidak",
+    "pasal": "tentang",
+    "koit": "mati",
+    "sound": "tegur",
+    "skit": "sakit",
+    "sy": "saya",
+    "nggak": "tidak",
+    "pake": "pakai",
+    "bener": "benar",
+    "sampe": "sampai",
+    "ama": "sama",
+    "pasu": "pasukan",
+    "serikat": "amerika_serikat",
+    "sia": "rusia",
 }
 
 # Additional Twitter-specific noise and Entity Blacklist (Names, Locations, Orgs)
 ADDITIONAL_STOPWORDS = {
     # Noise
     'rt', 'via', 'dm', 'cc', 'id', 'user', 'tweet', 'retweet', 'amp',
-    'wkwk', 'wkwkwk', 'deh', 'sih', 'dong', 'kok', 'lah', 'kah',
+    'wkwk', 'wkwkwk', 'deh', 'sih', 'dong', 'kok', 'lah', 'kah', 'lho',
+    'btw', 'dll', 'dkk', 'cc', 'barakallahufik',
+    
+    # Core Keywords (Too frequent in this dataset)
+    'perang', 'konflik', 'serang', 'lawan', 'militer', 'rudal', 'drone', 'bom',
+    'iran', 'perang', 'serang', 'lawan',
+    
+    # Entity Noise
+    'presiden', 'pimpin', 'perintah', 'menteri', 'rakyat', 'dunia', 'negara',
+    'bangsa', 'masyarakat', 'kawan', 'sekutu', 'musuh', 'pihak',
+    
+    # Media/Link Noise
+    'baca', 'berita', 'video', 'foto', 'gambar', 'update', 'klik', 'link', 
+    'selengkapnya', 'berikut', 'langsung', 'lapor', 'papar', 'breaking', 'news',
     
     # Locations (Countries/Regions/Cities)
     'iran', 'israel', 'amerika', 'as', 'usa', 'us', 'indonesia', 'indo',
-    'arab', 'saudi', 'rusia', 'china', 'palestina', 'gaza', 'lebanon', 
+    'arab', 'saudi', 'rusia', 'china', 'cina', 'palestina', 'gaza', 'lebanon', 
     'syiria', 'yaman', 'houthi', 'teheran', 'tel', 'aviv', 'yerusalem', 
     'washington', 'jakarta', 'barat', 'timur', 'tengah', 'selat', 'hormuz',
-    'teluk', 'negara', 'dunia', 'global',
+    'teluk', 'venezuela', 'isfahan', 'russia', 'ukrania', 'ukraina', 'pakistan', 
+    'afghanistan', 'taiwan', 'korea', 'selatan', 'utara', 'jepang', 'india', 
+    'malaysia', 'eropa', 'kuba', 'korut', 'syuriah', 'venesvela',
+    
+    # Time/Days
+    'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu', 'minggu',
+    'pagi', 'siang', 'sore', 'malam', 'hari', 'jam', 'menit', 'detik',
+    'tahun', 'bulan', 'minggu', 'pasca', 'sekarang', 'dulu', 'nanti', 'tadi',
     
     # People (Politicians/Leaders)
     'trump', 'donald', 'netanyahu', 'khamenei', 'biden', 'putin', 
-    'jokowi', 'prabowo', 'sby', 'bibi',
+    'jokowi', 'prabowo', 'sby', 'bibi', 'ali', 'akbar', 'velayati',
     
     # Organizations/Others
-    'pbb', 'nato', 'zionis', 'yahudi', 'islam', 'syiah', 'sunni'
+    'pbb', 'nato', 'zionis', 'yahudi', 'islam', 'syiah', 'sunni', 'idf',
+    'tni', 'hamas', 'friendly', 'fire', 'zionist', 'usa', 'uss', 'nazi',
+    'astaghfirullahal', 'adziim', 'moga', 'siapa', 'gerangan', 'pny',
+    'amin', 'mari', 'yuk', 'ayo', 'silahkan', 'mohon', 'tolong',
+    
+    # Pop Culture / Meme Noise
+    'loid', 'papah', 'anya', 'anime', 'manga',
+    
+    # General Fillers
+    'biar', 'bisa', 'jadi', 'buat', 'dapat', 'lihat', 'tahu', 'bilang', 
+    'rasa', 'tuju', 'kali', 'banget', 'sangat', 'terlalu', 'emang', 'memang',
+    'nyata', 'pasti', 'mungkin', 'kayaknya', 'mending', 'habis', 'aman',
+    'hasil', 'pikir', 'cakap', 'masalah', 'anda', 'kamu', 'saya', 'kita',
+    'mereka', 'kalian', 'orang', 'warga', 'anak', 'bini', 'suami', 'keluarga',
+    'mampu', 'beri', 'tahu', 'bilang', 'lihat', 'buat', 'jadi', 'bisa', 'pakai',
+    'serdadu', 'tentara', 'pasukan', 'menang', 'kalah', 'siaga', 'waspada',
+    'berita', 'lapor', 'kabar', 'info', 'informasi',
+    'sudah', 'kalau', 'saja', 'dari', 'karena', 'dalam', 'dengan', 'jangan',
+    'begitu', 'masih', 'lagi', 'bukan', 'lebih', 'tentang', 'banyak', 'tetap',
+    'sedang', 'beberapa', 'tidak', 'adalah', 'ada', 'itu', 'ini', 'yang',
+    'untuk', 'pada', 'juga', 'saat', 'sebagai', 'sangat', 'secara', 'serta',
+    'syria', 'venezuela', 'anjing', 'jahat', 'bodoh', 'bicara', 'minta',
+    'the', 'war', 'irgc', 'usd', 'uea', 'bro', 'nggak', 'pake', 'gila', 'aku', 
+    'kau', 'mana', 'satu', 'tuh', 'iya', 'doa', 'kek', 'mah', 'sok', 'ama',
+    'mbg', 'bop', 'org', 'sia', 'aju', 'pro', 'irak', 'iraq', 'israhell', 
+    'suriah', 'qatar', 'malaysia', 'ali', 'eropa', 'asia', 'laut', 'bbm',
+    'gara', 'kait', 'laku', 'fakta', 'bijak', 'kondisi', 'situasi', 'hidup',
+    'percaya', 'cepat', 'laku', 'fakta', 'juta', 'ribu', 'kait', 'gara',
+    'operasi', 'besar', 'cari', 'alas', 'bakar', 'uang', 'ubah', 'sejarah',
+    'kasih', 'bukti', 'jatuh', 'situasi', 'hidup', 'percaya', 'cepat', 'laku',
+    'fakta', 'bijak', 'kondisi', 'tewas', 'politik', 'kuasa', 'wilayah', 
+    'kawasan', 'pikir', 'jabat', 'pesawat', 'ganti', 'naik', 'turun', 'agama',
 }
 
 # AI/Bot account blacklist
@@ -115,6 +293,8 @@ class TweetCleaner:
         # Initialize Sastrawi tools
         self.stemmer = StemmerFactory().create_stemmer() if use_stemming else None
         self.stopword_remover = StopWordRemoverFactory().create_stop_word_remover()
+        # Cache for stemming results to speed up processing
+        self.stem_cache = {}
         
     def clean_text(self, text):
         if not isinstance(text, str):
@@ -168,13 +348,25 @@ class TweetCleaner:
         
         # 13. Stemming (Optional but recommended for GSDMM)
         if self.stemmer:
-            cleaned_text = self.stemmer.stem(cleaned_text)
+            # Apply stemming with cache for performance
+            stemmed_tokens = []
+            for word in cleaned_text.split():
+                if word not in self.stem_cache:
+                    self.stem_cache[word] = self.stemmer.stem(word)
+                stemmed_tokens.append(self.stem_cache[word])
+            cleaned_text = " ".join(stemmed_tokens)
             
         # 14. Final Tokenization & Filtering
-        # Filter out tokens that are too short (less than 3 chars) or common noise
-        final_tokens = [w for w in cleaned_text.split() if len(w) > 2]
+        # Filter out tokens that are too short (< 3) or too long (> 25)
+        # Also filter out words that are in ADDITIONAL_STOPWORDS after stemming
+        final_tokens = [w for w in cleaned_text.split() if 2 < len(w) < 25 and w not in ADDITIONAL_STOPWORDS]
         
         return " ".join(final_tokens)
+        
+# Helper function for multiprocessing
+def _process_chunk(chunk_df, use_stemming, col_name):
+    cleaner = TweetCleaner(use_stemming=use_stemming)
+    return chunk_df[col_name].apply(cleaner.clean_text)
 
 def main():
     # If no arguments are provided, switch to interactive mode
@@ -241,17 +433,25 @@ def main():
     if initial_rows != filtered_rows:
         print(f"[*] Removed {initial_rows - filtered_rows} tweets from blacklisted accounts.")
 
-    print("[*] Cleaning tweets...")
-    # Progress indicator for large datasets
+    print("[*] Cleaning tweets in parallel (using multiprocessing)...")
     total = len(df)
-    df['cleaned_text'] = ""
     
-    for i, row in df.iterrows():
-        df.at[i, 'cleaned_text'] = cleaner.clean_text(row[args.column])
-        if (i + 1) % 100 == 0:
-            print(f"    - Processed {i+1}/{total}...", end='\r')
+    # Split dataframe into chunks for parallel processing
+    num_cores = multiprocessing.cpu_count()
+    print(f"[*] Detected {num_cores} cores. Initializing workers...")
     
-    print(f"\n[*] Cleaning complete. {total} tweets processed.")
+    # Split the dataframe into equal parts
+    chunks = [df[i:i + total//num_cores + 1] for i in range(0, total, total//num_cores + 1)]
+    
+    with multiprocessing.Pool(processes=num_cores) as pool:
+        # Use partial to pass constant arguments
+        func = partial(_process_chunk, use_stemming=not args.no_stem, col_name=args.column)
+        results = pool.map(func, chunks)
+    
+    # Merge results back
+    df['cleaned_text'] = pd.concat(results)
+    
+    print(f"[*] Cleaning complete. {total} tweets processed.")
     
     # Remove empty results (GSDMM requirement: documents must have content)
     initial_count = len(df)
