@@ -78,3 +78,6 @@ lerna-debug.log*
 *.xls
 *.json
 twitter_cookies_*.json
+!preserve.json
+!slang_dict.json
+!stopwords.json
