@@ -59,37 +59,314 @@ def _interupt_handler(signum, frame):
     if AppState.STOP_REQUESTED:
         print("\n\033[0;31m[FATAL]\033[0m Forced Exit.")
         os._exit(1)
-    print("\n\033[0;33m[WAIT]\033[0m Interrupt detected! Gracefully saving data and wrapping up tasks... (Press Ctrl+C again to force exit)")
+    print("\n\033[0;33m[WAIT]\033[0m Interrupt detected! Returning to menu... (Press Ctrl+C again to force exit)")
     AppState.STOP_REQUESTED = True
+    raise KeyboardInterrupt
 
 signal.signal(signal.SIGINT, _interupt_handler)
 
 def init_twikit_patch():
-    """Applies necessary monkey patches to twikit to bypass recent API changes."""
+    """Applies a comprehensive Super Patch to twikit to bypass recent breaking Twitter API changes."""
     try:
-        _tx_mod = __import__('twikit.x_client_transaction.transaction', fromlist=['ClientTransaction'])
+        import twikit.x_client_transaction.transaction as _tx_mod
+        from twikit.utils import find_dict, Result
+        from twikit.tweet import Tweet
+        from functools import partial
+        import twikit.client.gql as _gql_mod
+        from twikit.client.gql import Endpoint
+
+        # [1] Fix: Official PR #410 On-Demand JS Discovery Logic
         _tx_mod.ON_DEMAND_FILE_REGEX = re.compile(r""",(\d+):["']ondemand\.s["']""", flags=(re.VERBOSE | re.MULTILINE))
         _tx_mod.ON_DEMAND_HASH_PATTERN = r',{}:"([0-9a-f]+)"'
+        _tx_mod.INDICES_REGEX = re.compile(r"\[(\d+)\],\s*16")
 
         async def _patched_get_indices(self, home_page_response, session, headers):
             response = self.validate_response(home_page_response) or self.home_page_response
-            match = _tx_mod.ON_DEMAND_FILE_REGEX.search(str(response))
-            if not match: raise Exception("ON_DEMAND_FILE_REGEX not found")
-            on_demand_idx = match.group(1)
-            regex = re.compile(_tx_mod.ON_DEMAND_HASH_PATTERN.format(on_demand_idx))
-            match = regex.search(str(response))
-            if not match: raise Exception("ON_DEMAND_HASH_PATTERN not found")
-            filename = match.group(1)
+            resp_str = str(response)
+            
+            match = _tx_mod.ON_DEMAND_FILE_REGEX.search(resp_str)
+            if not match:
+                match = re.search(r'["\']ondemand\.s["\']:\s*["\'](\w+)["\']', resp_str)
+                if not match: raise Exception("ON_DEMAND_FILE_REGEX not found")
+                filename = match.group(1)
+            else:
+                on_demand_idx = match.group(1)
+                hash_regex = re.compile(_tx_mod.ON_DEMAND_HASH_PATTERN.format(on_demand_idx))
+                match = hash_regex.search(resp_str)
+                if not match: raise Exception("ON_DEMAND_HASH_PATTERN not found")
+                filename = match.group(1)
+
             url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{filename}a.js"
             resp = await session.request(method="GET", url=url, headers=headers)
+            
             indices_match = _tx_mod.INDICES_REGEX.finditer(str(resp.text))
-            key_byte_indices = [item.group(2) for item in indices_match]
+            key_byte_indices = [item.group(1) for item in indices_match] # Group 1 as per PR #410
+            
+            if not key_byte_indices:
+                matches = re.findall(r'\((\w)\[(\d+)\],\s*16\)', str(resp.text))
+                key_byte_indices = [m[1] for m in matches]
+                
             if not key_byte_indices: raise Exception("Couldn't get KEY_BYTE indices")
             return int(key_byte_indices[0]), list(map(int, key_byte_indices[1:]))
 
         _tx_mod.ClientTransaction.get_indices = _patched_get_indices
+
+        # [2] Fix: Update SearchTimeline GraphQL Endpoint and Features (Latest: R0u1RWRf748KzyGBXvOYRA)
+        _gql_mod.Endpoint.SEARCH_TIMELINE = _gql_mod.Endpoint.url('R0u1RWRf748KzyGBXvOYRA/SearchTimeline')
+        
+        # Override gql_get to inject latest features if it's a search request
+        original_gql_get = _gql_mod.GQLClient.gql_get
+        async def _patched_gql_get(self, endpoint, variables, features=None, headers=None, extra_params=None, **kwargs):
+            try:
+                response_data = await original_gql_get(self, endpoint, variables, features, headers, extra_params, **kwargs)
+            except Exception as e:
+                if '404' in str(e) and 'SearchTimeline' in endpoint:
+                    # Multi-lane Fallback: Cycle through known working IDs
+                    alt_ids = ['flaR-PUMshxFWZWPNpq4zA', 'nK1dw4oV3_S97puv7wOshA', 't-97775-SearchTimeline']
+                    current_id = endpoint.split('/')[-2]
+                    
+                    response_data = None
+                    for alt_id in alt_ids:
+                        if alt_id == current_id: continue
+                        alt_endpoint = endpoint.replace(current_id, alt_id)
+                        try:
+                            print(f"[{Theme.YELLOW}Note{Theme.RESET}] Search ID {current_id} failed, trying {alt_id}...")
+                            response_data = await original_gql_get(self, alt_endpoint, variables, features, headers, extra_params, **kwargs)
+                            if response_data: break
+                        except: continue
+                    
+                    if not response_data: raise
+                else: raise
+            
+            # Universal JSON Extractor
+            try:
+                if not isinstance(response_data, dict):
+                    raw_txt = ""
+                    if hasattr(response_data, 'text'):
+                        raw_txt = response_data.text.strip()
+                    else:
+                        raw_txt = str(response_data).strip()
+                    
+                    # Regex to find the outermost { ... }
+                    import re
+                    match = re.search(r'(\{.*\})', raw_txt, re.DOTALL)
+                    if match:
+                        json_str = match.group(1)
+                        try:
+                            response_data = json.loads(json_str)
+                        except:
+                            # If direct JSON fails, try cleaning single quotes (JS-style)
+                            try:
+                                import ast
+                                response_data = ast.literal_eval(json_str)
+                            except: pass
+            except Exception as e:
+                print(f"[{Theme.YELLOW}Trace{Theme.RESET}] Extractor failed: {e}")
+
+            # Ensure we don't return a raw object to a function expecting JSON
+            if not isinstance(response_data, dict):
+                raw_val = response_data.text if hasattr(response_data, 'text') else str(response_data)
+                response_data = {'errors': [{'message': 'Raw response failed to parse as JSON', 'code': 0}], 'raw': raw_val}
+            else:
+                # Success Log (Silent if everything is working)
+                pass
+
+            # Black Box Logger
+            if 'SearchTimeline' in endpoint:
+                try:
+                    os.makedirs('scratch', exist_ok=True)
+                    with open('scratch/last_gql_response.json', 'w') as f:
+                        json.dump(response_data, f, indent=2, default=str)
+                except: pass
+
+            # API Error Reporting
+            errors = response_data.get('errors')
+            if errors and isinstance(errors, list):
+                first_error = errors[0] if isinstance(errors[0], dict) else {}
+                error_code = first_error.get('code')
+                error_message = first_error.get('message')
+                if error_code or error_message:
+                    print(f"[{Theme.RED}API Error {error_code}{Theme.RESET}] {error_message}")
+
+            return response_data
+        
+        _gql_mod.GQLClient.gql_get = _patched_gql_get
+
+        # [3] Fix: Search Result Parser (handles Twitter's new user data layout)
+        from twikit.client.client import Client, tweet_from_data
+        from twikit.user import User
+
+        def _patch_user_data(user_data):
+            """Twitter moved name/screen_name/created_at from user.legacy to user.core.
+            Twikit's User() reads from legacy, so we copy the fields back."""
+            if not isinstance(user_data, dict) or 'legacy' not in user_data:
+                return
+            legacy = user_data['legacy']
+            core = user_data.get('core', {})
+            # Migrate core fields into legacy so twikit's User() can read them
+            for field in ('name', 'screen_name', 'created_at'):
+                if field not in legacy and field in core:
+                    legacy[field] = core[field]
+            # Ensure rest_id exists
+            if 'rest_id' not in user_data:
+                user_data['rest_id'] = legacy.get('id_str', '0')
+            # Backfill defaults for fields User() expects but may be missing
+            defaults = {
+                'profile_image_url_https': '', 'location': '', 'description': '',
+                'entities': {'description': {'urls': []}}, 'pinned_tweet_ids_str': [],
+                'verified': False, 'possibly_sensitive': False, 'can_dm': False,
+                'can_media_tag': False, 'want_retweets': False, 'statuses_count': 0,
+                'translator_type': '', 'withheld_in_countries': [],
+            }
+            for k, v in defaults.items():
+                if k not in legacy:
+                    legacy[k] = v
+
+        def _safe_user(client, user_data):
+            """Build a User object safely, falling back to a stub on failure."""
+            if not user_data or not isinstance(user_data, dict):
+                return _stub_user()
+            try:
+                _patch_user_data(user_data)
+                return User(client, user_data)
+            except Exception:
+                legacy = user_data.get('legacy', {})
+                core = user_data.get('core', {})
+                return type('StubUser', (), {
+                    'name': core.get('name') or legacy.get('name', 'Unknown'),
+                    'screen_name': core.get('screen_name') or legacy.get('screen_name', 'unknown'),
+                    'rest_id': user_data.get('rest_id', '0'), 'id': user_data.get('rest_id', '0'),
+                })()
+
+        def _stub_user():
+            return type('StubUser', (), {
+                'name': 'Unknown', 'screen_name': 'unknown', 'rest_id': '0', 'id': '0',
+            })()
+
+        async def _patched_search_tweet(self, query, product, count=20, cursor=None):
+            product = product.capitalize()
+            variables = {
+                'rawQuery': query, 'count': count,
+                'querySource': 'typed_query', 'product': product,
+                'withGrokTranslatedBio': True,
+            }
+            if cursor:
+                variables['cursor'] = cursor
+
+            # Feature flags from PR #419
+            features = {
+                'rweb_video_screen_enabled': False,
+                'rweb_cashtags_enabled': True,
+                'profile_label_improvements_pcf_label_in_post_enabled': True,
+                'responsive_web_graphql_timeline_navigation_enabled': True,
+                'responsive_web_graphql_skip_user_profile_image_extensions_enabled': False,
+                'creator_subscriptions_tweet_preview_api_enabled': True,
+                'communities_web_enable_tweet_community_results_fetch': True,
+                'c9s_tweet_anatomy_moderator_badge_enabled': True,
+                'responsive_web_grok_analyze_button_fetch_trends_enabled': False,
+                'responsive_web_grok_analyze_post_followups_enabled': True,
+                'responsive_web_jetfuel_frame': True,
+                'responsive_web_grok_share_attachment_enabled': True,
+                'responsive_web_grok_annotations_enabled': True,
+                'articles_preview_enabled': True,
+                'responsive_web_edit_tweet_api_enabled': True,
+                'graphql_is_translatable_rweb_tweet_is_translatable_enabled': True,
+                'view_counts_everywhere_api_enabled': True,
+                'longform_notetweets_consumption_enabled': True,
+                'responsive_web_twitter_article_tweet_consumption_enabled': True,
+                'responsive_web_grok_show_grok_translated_post': True,
+                'responsive_web_grok_analysis_button_from_backend': True,
+                'responsive_web_grok_image_annotation_enabled': True,
+                'responsive_web_grok_imagine_annotation_enabled': True,
+                'responsive_web_grok_community_note_auto_translation_is_enabled': True,
+                'responsive_web_enhance_cards_enabled': False,
+                'responsive_web_search_grid_enabled': True,
+                'freedom_of_speech_not_reach_fetch_enabled': True,
+                'standardized_nudges_misinfo': True,
+                'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': True,
+                'longform_notetweets_rich_text_read_enabled': True,
+                'longform_notetweets_inline_media_enabled': True,
+                'post_ctas_fetch_enabled': True,
+                'content_disclosure_indicator_enabled': True,
+                'content_disclosure_ai_generated_indicator_enabled': True,
+                'premium_content_api_read_enabled': False,
+                'responsive_web_profile_redirect_enabled': False,
+                'rweb_tipjar_consumption_enabled': False,
+                'verified_phone_label_enabled': False,
+            }
+
+            response = await self.gql.gql_get(
+                _gql_mod.Endpoint.SEARCH_TIMELINE, variables, features
+            )
+
+            # --- Parse the GQL response ---
+            results = []
+            next_cursor = None
+            previous_cursor = None
+
+            # Navigate to the entries list via the standard GQL path
+            entries = []
+            try:
+                instructions = response['data']['search_by_raw_query']['search_timeline']['timeline']['instructions']
+                for inst in instructions:
+                    entries.extend(inst.get('entries', []))
+            except (KeyError, TypeError):
+                # Fallback: recursively find any list of entries
+                found = find_dict(response, 'entries', find_one=True)
+                if found:
+                    entries = found[0] if isinstance(found[0], list) else []
+
+            for entry in entries:
+                eid = entry.get('entryId', '')
+
+                # --- Cursor extraction ---
+                if 'cursor-bottom' in eid:
+                    next_cursor = entry.get('content', {}).get('value')
+                    continue
+                elif 'cursor-top' in eid:
+                    previous_cursor = entry.get('content', {}).get('value')
+                    continue
+
+                # --- Tweet extraction ---
+                if not eid.startswith('tweet-'):
+                    continue
+
+                try:
+                    # Standard path: content.itemContent.tweet_results.result
+                    item_content = entry['content']['itemContent']
+                    tweet_result = item_content['tweet_results']['result']
+
+                    # Handle "tweet" wrapper (e.g. visibility-filtered tweets)
+                    if 'tweet' in tweet_result:
+                        tweet_result = tweet_result['tweet']
+
+                    # Ensure rest_id
+                    if 'rest_id' not in tweet_result and 'legacy' in tweet_result:
+                        tweet_result['rest_id'] = tweet_result['legacy'].get('id_str')
+
+                    # Build User from core.user_results.result
+                    user_data = tweet_result.get('core', {}).get('user_results', {}).get('result')
+                    user = _safe_user(self, user_data)
+
+                    tweet = Tweet(self, tweet_result, user)
+                    results.append(tweet)
+                except Exception:
+                    pass
+
+            print(f"[{Theme.CYAN}Debug{Theme.RESET}] Parsed {len(results)} tweets from {len(entries)} entries.")
+
+            return Result(
+                results,
+                partial(self.search_tweet, query, product, count, next_cursor),
+                next_cursor,
+                partial(self.search_tweet, query, product, count, previous_cursor),
+                previous_cursor
+            )
+
+        Client.search_tweet = _patched_search_tweet
+        
     except Exception as e:
-        print(f"[{Theme.RED}Warning{Theme.RESET}] Twikit connection patch failed: {e}")
+        print(f"[{Theme.RED}Warning{Theme.RESET}] Twikit Super Patch failed: {e}")
 
 init_twikit_patch()
 
@@ -660,10 +937,18 @@ async def main():
         try:
             ch = get_input("SYSTEM READY. AWAITING DIRECTIVE")
             if ch == '0' or str(ch).lower() == 'q': break
-            if ch in MENU: await MENU[ch][2]()
+            if ch in MENU:
+                try:
+                    await MENU[ch][2]()
+                except KeyboardInterrupt:
+                    log("Operation interrupted. Returning to main menu...", "WAIT")
+                finally:
+                    AppState.STOP_REQUESTED = False
         except KeyboardInterrupt:
-            log("Session Terminated by User Activity.", "FATAL")
-            break
+            print()
+            log("Returning to main menu... (Ctrl+C again to quit)", "WAIT")
+            AppState.STOP_REQUESTED = False
+            continue
 
 if __name__ == "__main__":
     try: asyncio.run(main())
