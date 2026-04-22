@@ -77,4 +77,4 @@ lerna-debug.log*
 *.xlsx
 *.xls
 *.json
-!twitter_cookies_*.json
+twitter_cookies_*.json
