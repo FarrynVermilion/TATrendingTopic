@@ -1,0 +1,540 @@
+# 📘 Full Technical Documentation
+
+> **Project:** Detection of Geopolitical Trending Topics Using Modified Term-Level Burst Kleinberg and Mention-Based Link Anomaly
+> **Date:** 2026-04-28 | **Stack:** Vue 3 + Tailwind 4 · Django 6 + Python 3
+
+---
+
+## Table of Contents
+
+1. [System Architecture](#1-system-architecture)
+2. [Backend Algorithm Pipeline](#2-backend-algorithm-pipeline)
+3. [Frontend Component Hierarchy](#3-frontend-component-hierarchy)
+4. [API Contract Reference](#4-api-contract-reference)
+5. [Design System](#5-design-system)
+6. [File Inventory](#6-file-inventory)
+7. [Test Results](#7-test-results)
+
+---
+
+## 1. System Architecture
+
+```mermaid
+graph TB
+    subgraph "Frontend — Vue 3 + Tailwind 4"
+        UI[AppShell + StepperNav] --> S1[Step1: Dataset Overview]
+        UI --> S2[Step2: Preprocessing]
+        UI --> S3[Step3: Burst Kleinberg]
+        UI --> S4[Step4: Link Anomaly]
+        UI --> S5[Step5: Executive Summary]
+        S3 --> EC[vue-echarts]
+        S4 --> VN[vis-network]
+        S1 & S2 & S3 & S4 & S5 --> STORE[Pinia analysisStore]
+        STORE --> API_SVC[api.ts service]
+    end
+
+    subgraph "Backend — Django 6 REST"
+        API_SVC -->|HTTP/JSON| VIEWS[views.py]
+        VIEWS --> PP[preprocessing.py]
+        VIEWS --> KB[kleinberg.py]
+        VIEWS --> LA[link_anomaly.py]
+        VIEWS --> TV[trend_validator.py]
+    end
+
+    subgraph "Data Layer"
+        PP --> RAW[(perang_iran.csv\n27,207 tweets)]
+        PP --> CLN[(cleaned_output.csv\n18,868 tweets)]
+    end
+```
+
+### Data Flow Summary
+
+| Step | Frontend Component | API Endpoint | Backend Module |
+|------|--------------------|--------------|----------------|
+| 1 | `Step1DatasetOverview` | `GET /api/dataset/overview/` | `preprocessing.compute_dataset_overview()` |
+| — | Pipeline trigger | `POST /api/pipeline/start/` | `views._run_pipeline_background()` |
+| 2a | `Step2Preprocessing` (left) | `GET /api/preprocessing/ngrams/` | `preprocessing.extract_ngrams()` |
+| 2b | `Step2Preprocessing` (right) | `GET /api/preprocessing/edges/` | `preprocessing.extract_edge_list()` |
+| 3 | `Step3BurstKleinberg` | `GET /api/burst/analysis/` | `kleinberg.run_burst_detection()` |
+| 4 | `Step4LinkAnomaly` | `GET /api/link-anomaly/network/` | `link_anomaly.run_link_anomaly_analysis()` |
+| 5 | `Step5Summary` | `GET /api/summary/trends/` | `trend_validator.build_trend_summary()` |
+
+---
+
+## 2. Backend Algorithm Pipeline
+
+### 2.1 Module: `preprocessing.py` (264 lines)
+
+**Location:** [preprocessing.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/utils/preprocessing.py)
+
+**Purpose:** Bridges the scraper output and the two analysis dimensions.
+
+#### Functions
+
+| Function | Input | Output |
+|----------|-------|--------|
+| `extract_ngrams()` | Cleaned texts, n_range, min_df | DataFrame: `[id, term, frequency, n, df, tf_idf]` |
+| `extract_edge_list()` | Raw DataFrame (text, handle, datetime) | DataFrame: `[id, source_user, target_mention, weight, tweet_id, timestamp]` |
+| `build_term_time_series()` | Cleaned DataFrame, top_n_terms, bin_hours | `{term_series, bins, available_terms}` |
+| `compute_dataset_overview()` | Raw + Cleaned DataFrames | `DatasetMeta` dict |
+
+> [!WARNING]
+> `extract_edge_list()` uses **raw text** (before cleaning) because `tweet_cleaner.py` strips `@mentions`. The `handle` column provides the source user; `re.findall(r'@(\w+)', raw_text)` provides targets.
+
+#### N-Gram TF-IDF Calculation
+
+```
+TF(t)    = frequency(t) / total_terms
+IDF(t)   = log2(N / df(t))
+TF-IDF   = TF × IDF
+```
+
+Filters: `min_df ≥ 3`, `max_df_ratio ≤ 0.85` (removes too-rare and too-common terms).
+
+---
+
+### 2.2 Module: `kleinberg.py` (269 lines)
+
+**Location:** [kleinberg.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/utils/kleinberg.py)
+
+**Purpose:** Modified Term-Level Burst Detection via Kleinberg's infinite-state automaton.
+
+#### Algorithm
+
+The Kleinberg automaton models term frequency as transitions between discrete states:
+
+- **State 0** = baseline rate (normal frequency)
+- **State 1+** = elevated burst rate (higher states = stronger bursts)
+
+**Optimal state sequence** found via Viterbi dynamic programming.
+
+#### Mathematical Model
+
+```
+Base rate:     λ₀ = total_events / n_intervals
+State rate:    λ_q = λ₀ × s^q        (s = scaling factor, default 2.0)
+Transition:    τ(i→j) = (j-i) × γ × ln(n)    if j > i, else 0
+Emission:      -log Poisson(count; λ_q)
+```
+
+#### Key Class: `KleinbergBurstDetector`
+
+```python
+detector = KleinbergBurstDetector(s=2.0, gamma=1.0)
+bursts = detector.detect_for_term("perang", [(bin_label, count), ...])
+# Returns: List[BurstInterval(term, start, end, burst_level, intensity, weight)]
+```
+
+**Parameters:**
+
+| Param | Default | Effect |
+|-------|---------|--------|
+| `s` | 2.0 | Scaling between states. Higher = needs stronger evidence for bursts |
+| `gamma` | 1.0 | Transition cost. Higher = fewer, more significant bursts |
+| `max_states` | 5 | Maximum burst depth |
+
+#### Pipeline Entry: `run_burst_detection()`
+
+Runs detection across all terms (or a selected subset) and returns the `BurstAnalysis` structure consumed by the frontend's ECharts visualization.
+
+---
+
+### 2.3 Module: `link_anomaly.py` (465 lines)
+
+**Location:** [link_anomaly.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/utils/link_anomaly.py)
+
+**Purpose:** Detect anomalous mention patterns (bot networks, astroturfing) using 5 proxy features inspired by Sato et al. (2012).
+
+#### Five Anomaly Features
+
+| # | Feature | Normal | Anomalous | Weight |
+|---|---------|--------|-----------|--------|
+| 1 | **Degree entropy** | High (diverse mentions) | Low (few targets) | 0.25 |
+| 2 | **Temporal clustering** | Spread over time | Tight bursts | 0.20 |
+| 3 | **Source/target ratio** | Balanced (~0.5) | Imbalanced (>>1) | 0.20 |
+| 4 | **Reciprocity** | Some mutual mentions | One-directional | 0.15 |
+| 5 | **Hub concentration** | Distributed | Top-K receive most | 0.20 |
+
+#### Anomaly Score Formula
+
+```
+anomaly_score = Σ(feature_i × weight_i)    ∈ [0, 1]
+```
+
+Scores above `θ = 0.5` flag the network window as anomalous.
+
+#### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `compute_anomaly_score()` | Aggregate 5 features into a single score for an edge set |
+| `build_network_graph()` | Construct vis-network data (nodes, edges, anomaly clusters) |
+| `run_link_anomaly_analysis()` | **Windowed analysis**: for each burst period, slice edges to that window, score anomaly |
+
+> [!IMPORTANT]
+> **Windowed Social Validation** — The critical design: for each burst detected by Kleinberg, we window the edge list to that exact time range, then compute anomaly only on those edges. This makes anomaly detection term-specific and temporally coherent.
+
+---
+
+### 2.4 Module: `trend_validator.py` (260 lines)
+
+**Location:** [trend_validator.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/utils/trend_validator.py)
+
+**Purpose:** The thesis core contribution — dual-gate classification merging text + social dimensions.
+
+#### Decision Matrix
+
+```
+                      Social Gate (Link Anomaly)
+                    ┌───────────────┬───────────────┐
+                    │ score ≤ θ     │ score > θ     │
+    ────────────────┼───────────────┼───────────────┤
+    Burst ≥ 1       │ 🟢 organic    │ 🔴 anomalous  │
+    (Kleinberg)     │               │               │
+    ────────────────┼───────────────┼───────────────┤
+    Burst = 0       │ ⚪ unverified │ 🟡 suspicious  │
+    (no burst)      │               │               │
+    ────────────────┴───────────────┴───────────────┘
+```
+
+#### `classify_trend()` — The Dual-Gate Function
+
+```python
+def classify_trend(term, burst_level, anomaly_score, theta=0.5) -> str:
+    has_burst    = burst_level >= 1
+    is_anomalous = anomaly_score > theta
+    if has_burst and not is_anomalous:     return 'organic'
+    elif has_burst and is_anomalous:       return 'anomalous'
+    elif not has_burst and is_anomalous:   return 'suspicious'
+    else:                                  return 'unverified'
+```
+
+#### `build_trend_summary()` — Executive Summary Builder
+
+1. Groups burst periods by term, selects the strongest burst per term
+2. Cross-references each burst with its link anomaly score
+3. Applies `classify_trend()` to produce status
+4. Infers category via keyword matching (military, diplomacy, politics, economy, humanitarian)
+5. Ranks: organic first → by burst level → by intensity
+
+#### `run_full_pipeline()` — Master Orchestrator
+
+Chains all 4 modules in sequence. Used by `views._run_pipeline_background()`.
+
+---
+
+### 2.5 Django Views & URLs
+
+**Location:** [views.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/views.py) (441 lines) · [urls.py](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/backend/api/urls.py)
+
+#### Pipeline State Management
+
+Uses an in-memory `_pipeline_state` dict (suitable for development). For production, migrate to Redis/Celery.
+
+```python
+_pipeline_state = {
+    'status': 'idle',       # idle | running | completed | error
+    'df_raw': None,         # Lazy-loaded from perang_iran.csv
+    'df_cleaned': None,     # Lazy-loaded from cleaned_output.csv
+    'ngrams': None,         # DataFrame from Step 2
+    'edge_list': None,      # DataFrame from Step 2
+    'burst_analysis': None, # Dict from Step 3
+    'network_data': None,   # Dict from Step 4
+    'trends': None,         # List from Step 5
+    'overview': None,       # Dict from Step 1
+}
+```
+
+#### Authentication
+
+All endpoints require `X-Api-Key` header, validated by the `@api_key_required` decorator in `auth.py`.
+
+---
+
+## 3. Frontend Component Hierarchy
+
+```
+App.vue
+└── AppShell.vue ─────────────────── Dark sidebar + responsive layout
+    ├── StepperNav.vue ──────────── Vertical stepper (desktop)
+    ├── StepperProgress.vue ─────── Horizontal progress (mobile)
+    └── <RouterView>
+        └── AnalysisView.vue ────── Step orchestrator + transitions
+            ├── Step1DatasetOverview.vue
+            │   ├── StatCard.vue × 4 ──── KPI metrics
+            │   └── LoadingOverlay.vue
+            ├── Step2Preprocessing.vue
+            │   └── DataTable.vue × 2 ──── N-Grams + Edge List
+            ├── Step3BurstKleinberg.vue
+            │   └── VChart (vue-echarts) ── Line chart + markArea
+            ├── Step4LinkAnomaly.vue
+            │   └── vis-network (canvas) ── Interactive graph
+            └── Step5Summary.vue
+                └── StatusBadge.vue ──── 🟢🔴🟡⚪ badges
+```
+
+### Shared Components
+
+| Component | Location | Props | Purpose |
+|-----------|----------|-------|---------|
+| `StatCard` | [StatCard.vue](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/components/shared/StatCard.vue) | label, value, subtitle, icon, color | Glassmorphic KPI card with gradient icons |
+| `DataTable` | [DataTable.vue](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/components/shared/DataTable.vue) | title, columns, rows, totalCount, currentPage, totalPages, isLoading | Paginated table with skeleton loading + named slots |
+| `LoadingOverlay` | [LoadingOverlay.vue](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/components/shared/LoadingOverlay.vue) | message, overlay? | Dual-ring CSS spinner |
+| `StatusBadge` | [StatusBadge.vue](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/components/shared/StatusBadge.vue) | status, size? | Color-coded trend classification badge |
+
+### State Management: `analysisStore.ts`
+
+**Location:** [analysisStore.ts](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/stores/analysisStore.ts) (246 lines)
+
+Pinia store managing the entire pipeline state:
+
+| State Property | Type | Updated By |
+|----------------|------|------------|
+| `datasetMeta` | `DatasetMeta \| null` | `fetchDatasetOverview()` |
+| `ngrams` | `PaginatedResponse<NGram>` | `fetchNgrams(page)` |
+| `edgeList` | `PaginatedResponse<Edge>` | `fetchEdges(page)` |
+| `burstAnalysis` | `BurstAnalysis` | `fetchBurstAnalysis(term?)` |
+| `networkData` | `NetworkData` | `fetchNetworkData()` |
+| `trendResults` | `TrendResult[]` | `fetchTrendSummary()` |
+| `currentStep` | `StepId` | `setStep(n)` |
+| `pipelineStatus` | `PipelineStatus` | `startPipeline()` |
+
+### Composables
+
+| Composable | Location | Purpose |
+|------------|----------|---------|
+| `useStepper` | [useStepper.ts](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/composables/useStepper.ts) | Step navigation, locking, auto-fetch on transitions |
+| `usePagination` | [usePagination.ts](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/composables/usePagination.ts) | Reusable pagination logic for DataTable |
+
+---
+
+## 4. API Contract Reference
+
+Base URL: `http://localhost:8000/api`
+Auth: `X-Api-Key: <value from .env>`
+
+### `GET /dataset/overview/`
+
+**Response** (`DatasetMeta`):
+
+```json
+{
+  "total_tweets": 27207,
+  "rate_limit": 20,
+  "date_range": { "start": "2026-02-28", "end": "2026-04-26" },
+  "keyword_distribution": { "perang iran": 27060, "perang_iran": 147 },
+  "unique_users": 9341,
+  "avg_tweets_per_hour": 19.9
+}
+```
+
+### `POST /pipeline/start/`
+
+**Response:** `{ "pipeline_id": "main", "status": "started" }`
+
+### `GET /preprocessing/ngrams/?page=1`
+
+**Response** (`PaginatedResponse<NGram>`):
+
+```json
+{
+  "count": 10997,
+  "results": [
+    { "id": 1, "term": "israel", "frequency": 7572, "n": 1, "df": 6541, "tf_idf": 0.020651 }
+  ]
+}
+```
+
+### `GET /preprocessing/edges/?page=1`
+
+**Response** (`PaginatedResponse<Edge>`):
+
+```json
+{
+  "count": 17977,
+  "results": [
+    { "id": 1, "source_user": "userA", "target_mention": "userB", "weight": 1, "tweet_id": "...", "timestamp": "2026-03-15 12:00:00" }
+  ]
+}
+```
+
+### `GET /burst/analysis/?term=perang`
+
+**Response** (`BurstAnalysis`):
+
+```json
+{
+  "term_frequencies": [{ "date": "2026-03-01 00:00", "frequency": 5, "term": "perang" }],
+  "burst_periods": [{ "term": "perang", "start": "2026-03-15 06:00", "end": "2026-03-18 12:00", "burst_level": 2, "intensity": 0.85 }],
+  "available_terms": ["israel", "perang", "iran", "nuklir", "rudal"]
+}
+```
+
+### `GET /link-anomaly/network/`
+
+**Response** (`NetworkData`):
+
+```json
+{
+  "nodes": [{ "id": "userA", "label": "userA", "degree": 45, "anomaly_score": 0.0, "group": "normal" }],
+  "edges": [{ "id": "e-1", "from": "userA", "to": "userB", "weight": 3, "is_anomalous": false }],
+  "anomalies": [{ "cluster_id": 1, "type": "bot_network", "nodes": ["bot1", "bot2"], "confidence": 0.78, "description": "..." }]
+}
+```
+
+### `GET /summary/trends/`
+
+**Response:**
+
+```json
+{
+  "trends": [{
+    "rank": 1, "term": "as", "category": "general", "status": "organic",
+    "burst_level": 2, "anomaly_score": 0.320, "mention_count": 93,
+    "burst_start": "2026-03-25 00:00", "burst_end": "2026-03-28 15:00"
+  }]
+}
+```
+
+---
+
+## 5. Design System
+
+**Location:** [main.css](file:///home/edelweiss/Program/pythonProject/TATrendingTopic/frontend/src/assets/main.css) (189 lines)
+
+### Color Tokens (OKLCH)
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--color-primary` | `oklch(0.55 0.22 264)` | Buttons, active states, links |
+| `--color-accent` | `oklch(0.65 0.18 180)` | Secondary highlights, mentions |
+| `--color-danger` | `oklch(0.55 0.22 25)` | Anomalous status, errors |
+| `--color-success` | `oklch(0.60 0.18 145)` | Organic status |
+| `--color-warning` | `oklch(0.70 0.18 85)` | Suspicious status |
+| `--color-sidebar` | `oklch(0.15 0.04 264)` | Dark sidebar background |
+| `--color-surface` | `oklch(0.98 0.005 264)` | Page background |
+
+### CSS Classes
+
+| Class | Purpose |
+|-------|---------|
+| `.glass` | Glassmorphic panel (blur, border, shadow) |
+| `.card` | Glass card with hover lift animation |
+| `.btn-primary` | Gradient button with glow shadow |
+| `.btn-secondary` | Subtle bordered button |
+| `.gradient-text` | Primary→accent gradient text |
+| `.stat-value` | Large tabular-nums metric display |
+| `.float-up` | Entry animation (translateY + fade) |
+| `.glow-pulse` | Infinite glow animation for CTA buttons |
+| `.skeleton` | Shimmer loading placeholder |
+
+### Typography
+
+- **Sans:** Inter (Google Fonts) — UI text
+- **Mono:** JetBrains Mono — data values, code, term labels
+
+---
+
+## 6. File Inventory
+
+### New Files Created (24 total)
+
+#### Backend — Algorithm Modules (4 files, 1,258 lines)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `backend/api/utils/preprocessing.py` | 264 | N-gram extraction, edge list, time-binning |
+| `backend/api/utils/kleinberg.py` | 269 | Viterbi-based burst detection |
+| `backend/api/utils/link_anomaly.py` | 465 | 5-feature anomaly scoring + network graph |
+| `backend/api/utils/trend_validator.py` | 260 | Dual-gate classifier + pipeline orchestrator |
+
+#### Frontend — Components (17 files, ~1,800 lines)
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/types/analysis.ts` | 132 | TypeScript interfaces for full pipeline |
+| `src/stores/analysisStore.ts` | 246 | Pinia state management |
+| `src/services/api.ts` | 93 | Axios API client (7 endpoints) |
+| `src/composables/useStepper.ts` | 66 | Step navigation logic |
+| `src/composables/usePagination.ts` | 69 | Reusable pagination |
+| `src/components/layout/AppShell.vue` | 64 | Sidebar + content layout |
+| `src/components/layout/StepperNav.vue` | 69 | Vertical step indicator |
+| `src/components/layout/StepperProgress.vue` | 38 | Mobile progress bar |
+| `src/components/shared/StatCard.vue` | 58 | KPI metric card |
+| `src/components/shared/DataTable.vue` | 178 | Paginated sortable table |
+| `src/components/shared/LoadingOverlay.vue` | 21 | Spinner overlay |
+| `src/components/shared/StatusBadge.vue` | 44 | Status indicator badge |
+| `src/components/steps/Step1DatasetOverview.vue` | 156 | Dataset KPIs + pipeline trigger |
+| `src/components/steps/Step2Preprocessing.vue` | 91 | Side-by-side data tables |
+| `src/components/steps/Step3BurstKleinberg.vue` | 191 | ECharts line chart + burst overlays |
+| `src/components/steps/Step4LinkAnomaly.vue` | 175 | vis-network graph + anomaly cards |
+| `src/components/steps/Step5Summary.vue` | 98 | Classification table + reset |
+
+### Modified Files (7 total)
+
+| File | Change |
+|------|--------|
+| `backend/api/views.py` | Rewrote with 8 new endpoints (441 lines) |
+| `backend/api/urls.py` | Added all pipeline routes |
+| `backend/api/utils/__init__.py` | Module docstrings |
+| `frontend/src/App.vue` | Simplified to AppShell + RouterView |
+| `frontend/src/router/index.ts` | Single AnalysisView route |
+| `frontend/src/assets/main.css` | Full design system rewrite |
+| `frontend/vite.config.ts` | Code-splitting for echarts/vis-network |
+| `frontend/index.html` | SEO meta + thesis title |
+
+### NPM Dependencies Added
+
+| Package | Version | Used In |
+|---------|---------|---------|
+| `echarts` | latest | Step 3 line chart |
+| `vue-echarts` | latest | Vue wrapper for ECharts |
+| `vis-network` | latest | Step 4 network graph |
+| `vis-data` | latest | DataSet for vis-network |
+| `@heroicons/vue` | latest | Icon library |
+
+---
+
+## 7. Test Results
+
+### TypeScript Compilation
+
+```
+$ npx vue-tsc --noEmit
+✅ 0 errors
+```
+
+### Vite Production Build
+
+```
+$ npx vite build
+dist/index.html                       0.81 kB │ gzip:   0.46 kB
+dist/assets/index-*.css              47.31 kB │ gzip:   8.65 kB
+dist/assets/index-*.js              115.15 kB │ gzip:  40.98 kB
+dist/assets/echarts-*.js            635.65 kB │ gzip: 217.70 kB  (lazy)
+dist/assets/vis-network-*.js        749.11 kB │ gzip: 224.48 kB  (lazy)
+✅ Built in 7.91s
+```
+
+### End-to-End Pipeline (27,207 tweets)
+
+```
+Step 1 ✅ Overview:   27,207 tweets │ 9,341 users │ Feb 28 → Apr 26
+Step 2 ✅ N-Grams:    10,997 terms  │ Top: israel, perang iran, negara
+         Edge List:   17,977 edges  │ 5,662 → 5,066 users (1.5s)
+Step 3 ✅ Kleinberg:  179 bursts    │ 30 terms │ Levels 1-2
+Step 4 ✅ Anomaly:    200 nodes     │ 663 edges │ Scores: 0.30-0.33
+Step 5 ✅ Trends:     30 classified │ All 🟢 organic (correct for real topic)
+
+Top 10 Results:
+ #1  🟢  "as"        L2  anomaly=0.320  general
+ #2  🟢  "indonesia" L2  anomaly=0.323  general
+ #3  🟢  "serikat"   L2  anomaly=0.311  general
+ #4  🟢  "negara"    L2  anomaly=0.332  general
+ #5  🟢  "selat"     L2  anomaly=0.314  general
+ #6  🟢  "trump"     L2  anomaly=0.309  general
+ #7  🟢  "dunia"     L2  anomaly=0.314  general
+ #8  🟢  "timur"     L2  anomaly=0.318  general
+ #9  🟢  "presiden"  L2  anomaly=0.313  politics
+ #10 🟢  "minyak"    L2  anomaly=0.319  economy
+```
