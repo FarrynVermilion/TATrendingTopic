@@ -79,6 +79,8 @@ def extract_ngrams(texts: List[str], n_range: Tuple[int, int] = (1, 2),
             'frequency': freq,
             'n': n_size,
             'df': df,
+            'tf': round(tf, 8),
+            'idf': round(idf, 4),
             'tf_idf': round(tf_idf, 6),
         })
 
@@ -87,7 +89,7 @@ def extract_ngrams(texts: List[str], n_range: Tuple[int, int] = (1, 2),
         df_result = df_result.sort_values('tf_idf', ascending=False).reset_index(drop=True)
         df_result.insert(0, 'id', range(1, len(df_result) + 1))
 
-    return df_result
+    return df_result, total_terms
 
 
 # ─── Edge List (Mention Graph) Extraction ────────────────────────────────────
@@ -191,7 +193,7 @@ def build_term_time_series(df: pd.DataFrame,
 
     # Determine the top-N terms by TF-IDF
     all_texts = df[text_col].dropna().astype(str).tolist()
-    ngram_df = extract_ngrams(all_texts, n_range=(1, 1), min_df=5)
+    ngram_df, _ = extract_ngrams(all_texts, n_range=(1, 1), min_df=5)
 
     if ngram_df.empty:
         return {'term_series': {}, 'bins': [], 'available_terms': []}
@@ -238,22 +240,35 @@ def compute_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> 
     Returns:
         Dict matching the DatasetMeta TypeScript interface
     """
+    # Defensive check for required columns
+    required = ['datetime', 'keyword', 'handle']
+    missing = [c for c in required if c not in df_raw.columns]
+    if missing:
+        raise KeyError(f"Dataset is missing required columns: {', '.join(missing)}")
+
     timestamps = pd.to_datetime(df_raw['datetime'], errors='coerce').dropna()
 
     # Extract clean keyword (strip since_time/until_time suffixes)
     keywords = df_raw['keyword'].astype(str).str.split(r'\s+since_time', regex=True).str[0]
-    keyword_dist = dict(keywords.value_counts().head(20))
+    keyword_dist = {str(k): int(v) for k, v in keywords.value_counts().head(20).items()}
 
-    # Compute avg tweets per hour
+    # Compute stats
     if len(timestamps) >= 2:
         total_hours = (timestamps.max() - timestamps.min()).total_seconds() / 3600
         avg_per_hour = round(len(timestamps) / max(total_hours, 1), 1)
+        
+        # Calculate peak hourly rate using a 60-minute rolling window
+        # (This avoids the "calendar hour split" issue)
+        ts_series = pd.Series(1, index=timestamps).sort_index()
+        rolling_counts = ts_series.rolling('1h').count()
+        peak_rate = int(rolling_counts.max()) if not rolling_counts.empty else 0
     else:
         avg_per_hour = 0
+        peak_rate = len(df_raw)
 
     return {
         'total_tweets': len(df_raw),
-        'rate_limit': 20,  # Fixed constraint from scraper
+        'rate_limit': peak_rate,
         'date_range': {
             'start': timestamps.min().strftime('%Y-%m-%d') if len(timestamps) > 0 else '',
             'end': timestamps.max().strftime('%Y-%m-%d') if len(timestamps) > 0 else '',

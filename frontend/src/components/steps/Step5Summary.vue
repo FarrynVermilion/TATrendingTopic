@@ -22,22 +22,57 @@ const store = useAnalysisStore()
     </div>
 
     <!-- Stats Row -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 float-up">
-      <div class="card !p-4 text-center">
-        <p class="stat-value gradient-text">{{ store.trendResults.length }}</p>
-        <p class="text-xs text-text-muted mt-1">Total Trends</p>
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 float-up">
+      <!-- KPI Counts -->
+      <div class="lg:col-span-5 grid grid-cols-2 gap-4">
+        <div class="card !p-4 text-center">
+          <p class="stat-value gradient-text">{{ store.trendResults.length }}</p>
+          <p class="text-[10px] font-bold text-text-muted uppercase tracking-widest mt-1">Total Trends</p>
+        </div>
+        <div class="card !p-4 text-center">
+          <p class="stat-value text-success">{{ store.trendResults.filter(t => t.status === 'organic').length }}</p>
+          <p class="text-[10px] font-bold text-text-muted uppercase tracking-widest mt-1">Organic</p>
+        </div>
+        <div class="card !p-4 text-center">
+          <p class="stat-value text-danger">{{ store.trendResults.filter(t => t.status === 'anomalous').length }}</p>
+          <p class="text-[10px] font-bold text-text-muted uppercase tracking-widest mt-1">Anomalous</p>
+        </div>
+        <div class="card !p-4 text-center">
+          <p class="stat-value text-warning">{{ store.trendResults.filter(t => t.status === 'suspicious').length }}</p>
+          <p class="text-[10px] font-bold text-text-muted uppercase tracking-widest mt-1">Suspicious</p>
+        </div>
       </div>
-      <div class="card !p-4 text-center">
-        <p class="stat-value text-success">{{ store.trendResults.filter(t => t.status === 'organic').length }}</p>
-        <p class="text-xs text-text-muted mt-1">🟢 Organic</p>
-      </div>
-      <div class="card !p-4 text-center">
-        <p class="stat-value text-danger">{{ store.trendResults.filter(t => t.status === 'anomalous').length }}</p>
-        <p class="text-xs text-text-muted mt-1">🔴 Anomalous</p>
-      </div>
-      <div class="card !p-4 text-center">
-        <p class="stat-value text-warning">{{ store.trendResults.filter(t => t.status === 'suspicious').length }}</p>
-        <p class="text-xs text-text-muted mt-1">🟡 Suspicious</p>
+
+      <!-- Logic Matrix -->
+      <div class="lg:col-span-7 card !p-5 border-l-4 border-l-primary bg-primary/[0.02]">
+        <div class="flex items-start gap-4">
+          <div class="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 4.5v15m6-15v15m-10.875-15h15.75c.621 0 1.125.504 1.125 1.125V4.5A1.125 1.125 0 0 1 19.875 3h-15.75A1.125 1.125 0 0 1 3 4.125V3h1.125A1.125 1.125 0 0 1 5.25 4.125v.375Z" />
+            </svg>
+          </div>
+          <div class="space-y-3 w-full">
+            <p class="text-xs font-bold text-text uppercase tracking-wider">Dual-Gate Decision Matrix</p>
+            <div class="grid grid-cols-2 gap-px bg-border/40 border border-border/40 rounded-lg overflow-hidden">
+              <div class="bg-white p-3 space-y-1">
+                <p class="text-[10px] font-black text-success uppercase">🟢 Organic</p>
+                <p class="text-[9px] text-text-muted leading-tight">Burst detected in text + Normal social interaction network.</p>
+              </div>
+              <div class="bg-white p-3 space-y-1">
+                <p class="text-[10px] font-black text-danger uppercase">🔴 Anomalous</p>
+                <p class="text-[9px] text-text-muted leading-tight">Burst detected in text + Highly suspicious bot-like behavior.</p>
+              </div>
+              <div class="bg-white p-3 space-y-1">
+                <p class="text-[10px] font-black text-warning uppercase">🟡 Suspicious</p>
+                <p class="text-[9px] text-text-muted leading-tight">No significant burst + Unusually coordinated mentions detected.</p>
+              </div>
+              <div class="bg-white p-3 space-y-1">
+                <p class="text-[10px] font-black text-text-muted uppercase">⚪ Unverified</p>
+                <p class="text-[9px] text-text-muted leading-tight">Low activity + Normal social structure (Insignificant).</p>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

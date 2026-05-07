@@ -20,9 +20,11 @@ export interface DatasetMeta {
 export interface NGram {
   id: number
   term: string
-  frequency: number
+  frequency: number      // total count
   n: number              // 1 for unigram, 2 for bigram, etc.
   df: number             // document frequency
+  tf: number             // normalized term frequency
+  idf: number            // inverse document frequency
   tf_idf: number
 }
 
@@ -40,6 +42,7 @@ export interface PaginatedResponse<T> {
   count: number
   next: string | null
   previous: string | null
+  total_tokens?: number
 }
 
 // ─── Step 3: Burst Kleinberg ────────────────────────────────────────────────
@@ -129,4 +132,11 @@ export interface StepDefinition {
   isCompleted: boolean
   isActive: boolean
   isLocked: boolean
+}
+
+export interface AnalysisConfig {
+  kleinberg_s: number
+  kleinberg_gamma: number
+  anomaly_threshold: number
+  min_ngram_freq: number
 }

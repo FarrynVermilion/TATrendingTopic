@@ -213,7 +213,7 @@ def run_full_pipeline(df_raw: pd.DataFrame,
 
     # ─── Step 2: Preprocessing ───────────────────────────────────────
     cleaned_texts = df_cleaned['cleaned_text'].dropna().astype(str).tolist()
-    ngrams = extract_ngrams(cleaned_texts, n_range=(1, 2), min_df=5)
+    ngrams, total_tokens = extract_ngrams(cleaned_texts, n_range=(1, 2), min_df=5)
     edge_list = extract_edge_list(df_raw)
 
     # ─── Step 3: Burst Detection ─────────────────────────────────────
@@ -248,6 +248,7 @@ def run_full_pipeline(df_raw: pd.DataFrame,
         'overview': overview,
         'ngrams': {
             'count': len(ngrams),
+            'total_tokens': total_tokens,
             'results': ngrams.to_dict('records') if not ngrams.empty else [],
         },
         'edge_list': {

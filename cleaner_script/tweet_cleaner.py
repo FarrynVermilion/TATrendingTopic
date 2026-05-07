@@ -95,28 +95,21 @@ def _process_chunk_optimized(chunk_data, slang_dict):
     cleaned = chunk_data.apply(lambda x: worker_cleaner.clean_text(x, slang_dict))
     return cleaned, worker_cleaner.stats
 
-def main():
-    print("="*50)
-    print("      INDONESIAN TWEET CLEANER - OPTIMIZED CLI")
-    print("="*50)
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input")
-    parser.add_argument("output")
-    parser.add_argument("--column", default="text")
-    parser.add_argument("--no-stem", action="store_true")
-    parser.add_argument("--cores", type=int, default=4)
-    args = parser.parse_args()
-    
+def run_cleaning_pipeline(input_path, output_path, column='text', use_stemming=True, cores=4):
+    """
+    Core cleaning pipeline function that can be called from CLI or GUI.
+    Returns a dictionary of statistics.
+    """
     try:
-        if args.input.endswith('.csv'):
-            df = pd.read_csv(args.input)
-        elif args.input.endswith('.json'):
-            df = pd.read_json(args.input)
+        if input_path.endswith('.csv'):
+            df = pd.read_csv(input_path)
+        elif input_path.endswith('.json'):
+            df = pd.read_json(input_path)
         else:
-            df = pd.read_excel(args.input)
+            df = pd.read_excel(input_path)
     except Exception as e:
-        print(f"[!] Error loading input: {e}"); return
+        print(f"[!] Error loading input: {e}")
+        return None
 
     total_initial = len(df)
     if 'handle' in df.columns:
@@ -125,15 +118,14 @@ def main():
     total_after_bot_filter = len(df)
     bots_removed = total_initial - total_after_bot_filter
 
-    num_cores = min(args.cores, multiprocessing.cpu_count())
+    num_cores = min(cores, multiprocessing.cpu_count())
     print(f"[*] Starting {num_cores} workers. Please wait...")
     
-    # Using smaller chunks for smoother progress bar
     chunk_size = max(1, total_after_bot_filter // (num_cores * 20))
-    chunks = [df[args.column][i:i + chunk_size] for i in range(0, total_after_bot_filter, chunk_size)]
+    chunks = [df[column][i:i + chunk_size] for i in range(0, total_after_bot_filter, chunk_size)]
     
     start_time = time.time()
-    with multiprocessing.Pool(processes=num_cores, initializer=_init_worker, initargs=(not args.no_stem,)) as pool:
+    with multiprocessing.Pool(processes=num_cores, initializer=_init_worker, initargs=(use_stemming,)) as pool:
         init_end = time.time()
         print(f"[*] Workers ready in {init_end - start_time:.2f}s. Processing {total_after_bot_filter} tweets...")
         
@@ -141,7 +133,6 @@ def main():
         func = partial(_process_chunk_optimized, slang_dict=SLANG_DICT)
         
         results = []
-        # tqdm progress bar over imap results
         for res in tqdm(pool.imap(func, chunks), total=len(chunks), desc="Cleaning Progress"):
             results.append(res)
             
@@ -155,28 +146,63 @@ def main():
     df = df[df['cleaned_text'].str.strip() != ""]
     final_total = len(df)
     empty_removed = total_after_bot_filter - final_total
-    if args.output.endswith('.json'):
-        df.to_json(args.output, orient='records', indent=4)
+    
+    if output_path.endswith('.json'):
+        df.to_json(output_path, orient='records', indent=4)
     else:
-        df.to_csv(args.output, index=False)
+        df.to_csv(output_path, index=False)
     
     all_words = " ".join(df['cleaned_text'].astype(str)).split()
     word_counts = Counter(all_words)
     pd.DataFrame(word_counts.most_common(), columns=['word', 'count']).to_csv("word_frequencies.csv", index=False)
     
-    print("\n" + "="*50)
-    print("               CLEANING SUMMARY")
+    stats = {
+        'total_initial': total_initial,
+        'bots_removed': bots_removed,
+        'empty_removed': empty_removed,
+        'final_total': final_total,
+        'startup_time': init_end - start_time,
+        'processing_time': proc_end - proc_start,
+        'unique_vocab': len(word_counts),
+        'total_deleted': total_initial - final_total
+    }
+    return stats
+
+def main():
     print("="*50)
-    print(f"Initial Tweets      : {total_initial}")
-    print(f"Bots Removed        : {bots_removed}")
-    print(f"Empty After Clean   : {empty_removed}")
-    print(f"Final Tweets (Used) : {final_total}")
-    print(f"Total Deleted       : {total_initial - final_total}")
-    print("-" * 30)
-    print(f"Startup Time        : {init_end - start_time:.2f} seconds")
-    print(f"Processing Time     : {proc_end - proc_start:.2f} seconds")
-    print(f"Unique Vocabulary   : {len(word_counts)} words")
+    print("      INDONESIAN TWEET CLEANER - OPTIMIZED CLI")
     print("="*50)
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input")
+    parser.add_argument("output")
+    parser.add_argument("--column", default="text")
+    parser.add_argument("--no-stem", action="store_true")
+    parser.add_argument("--cores", type=int, default=4)
+    args = parser.parse_args()
+    
+    stats = run_cleaning_pipeline(
+        args.input, 
+        args.output, 
+        column=args.column, 
+        use_stemming=not args.no_stem, 
+        cores=args.cores
+    )
+    
+    if stats:
+        print("\n" + "="*50)
+        print("               CLEANING SUMMARY")
+        print("="*50)
+        print(f"Initial Tweets      : {stats['total_initial']}")
+        print(f"Bots Removed        : {stats['bots_removed']}")
+        print(f"Empty After Clean   : {stats['empty_removed']}")
+        print(f"Final Tweets (Used) : {stats['final_total']}")
+        print(f"Total Deleted       : {stats['total_deleted']}")
+        print("-" * 30)
+        print(f"Startup Time        : {stats['startup_time']:.2f} seconds")
+        print(f"Processing Time     : {stats['processing_time']:.2f} seconds")
+        print(f"Unique Vocabulary   : {stats['unique_vocab']} words")
+        print("="*50)
 
 if __name__ == "__main__":
     main()

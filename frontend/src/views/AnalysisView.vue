@@ -30,14 +30,37 @@ const { currentStep, canGoNext, canGoPrev, handleNext, handlePrev, isLoading } =
       </div>
     </Transition>
 
-    <!-- Step Content -->
-    <Transition name="fade" mode="out-in">
-      <Step1DatasetOverview v-if="currentStep === 1" key="step1" />
-      <Step2Preprocessing v-else-if="currentStep === 2" key="step2" />
-      <Step3BurstKleinberg v-else-if="currentStep === 3" key="step3" />
-      <Step4LinkAnomaly v-else-if="currentStep === 4" key="step4" />
-      <Step5Summary v-else-if="currentStep === 5" key="step5" />
-    </Transition>
+    <!-- Step Content (Stacked) -->
+    <div class="flex flex-col gap-16 pb-12">
+      <!-- Step 1 is always visible -->
+      <div id="step-1" class="scroll-mt-24">
+        <Step1DatasetOverview />
+      </div>
+
+      <Transition name="fade">
+        <div v-if="currentStep >= 2" id="step-2" class="scroll-mt-24 relative before:absolute before:inset-0 before:bg-white/40 before:-z-10 dark:before:bg-black/20 p-8 rounded-3xl border border-border/60 shadow-sm">
+          <Step2Preprocessing />
+        </div>
+      </Transition>
+
+      <Transition name="fade">
+        <div v-if="currentStep >= 3" id="step-3" class="scroll-mt-24 relative before:absolute before:inset-0 before:bg-white/40 before:-z-10 dark:before:bg-black/20 p-8 rounded-3xl border border-border/60 shadow-sm">
+          <Step3BurstKleinberg />
+        </div>
+      </Transition>
+
+      <Transition name="fade">
+        <div v-if="currentStep >= 4" id="step-4" class="scroll-mt-24 relative before:absolute before:inset-0 before:bg-white/40 before:-z-10 dark:before:bg-black/20 p-8 rounded-3xl border border-border/60 shadow-sm">
+          <Step4LinkAnomaly />
+        </div>
+      </Transition>
+
+      <Transition name="fade">
+        <div v-if="currentStep >= 5" id="step-5" class="scroll-mt-24 relative before:absolute before:inset-0 before:bg-white/40 before:-z-10 dark:before:bg-black/20 p-8 rounded-3xl border border-border/60 shadow-sm">
+          <Step5Summary />
+        </div>
+      </Transition>
+    </div>
 
     <!-- Bottom Navigation -->
     <div

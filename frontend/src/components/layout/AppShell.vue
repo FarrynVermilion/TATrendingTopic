@@ -30,13 +30,43 @@ const store = useAnalysisStore()
         <StepperNav />
       </div>
 
-      <!-- Footer -->
-      <div class="p-4 border-t border-white/10">
-        <div class="flex items-center gap-2 text-xs text-sidebar-muted">
-          <div class="w-2 h-2 rounded-full" :class="store.pipelineStatus === 'running' ? 'bg-accent animate-pulse' : store.pipelineStatus === 'completed' ? 'bg-success' : 'bg-sidebar-muted'" />
-          <span class="capitalize">{{ store.pipelineStatus }}</span>
+      <!-- Footer: Pipeline Status -->
+      <div class="p-6 border-t border-white/10 bg-black/20">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-[10px] font-bold uppercase tracking-widest text-white/90">System Status</span>
+          <div v-if="store.pipelineStatus === 'running'" class="flex gap-1">
+            <span class="w-1 h-3 bg-accent animate-[bounce_1s_infinite_0ms] rounded-full shadow-[0_0_8px_var(--color-accent)]"></span>
+            <span class="w-1 h-3 bg-accent animate-[bounce_1s_infinite_200ms] rounded-full shadow-[0_0_8px_var(--color-accent)]"></span>
+            <span class="w-1 h-3 bg-accent animate-[bounce_1s_infinite_400ms] rounded-full shadow-[0_0_8px_var(--color-accent)]"></span>
+          </div>
         </div>
-        <p class="text-[11px] text-sidebar-muted/50 mt-1">Modified Burst Kleinberg × Link Anomaly</p>
+        
+        <div 
+          class="flex items-center gap-3 p-3 rounded-xl transition-all duration-500"
+          :class="[
+            store.pipelineStatus === 'running' ? 'bg-accent/20 border border-accent/40' : 
+            store.pipelineStatus === 'completed' ? 'bg-success/20 border border-success/40' : 
+            'bg-white/5 border border-white/20'
+          ]"
+        >
+          <div 
+            class="w-3 h-3 rounded-full shadow-[0_0_12px_rgba(0,0,0,0.5)]" 
+            :class="[
+              store.pipelineStatus === 'running' ? 'bg-accent animate-pulse shadow-accent/60' : 
+              store.pipelineStatus === 'completed' ? 'bg-success shadow-success/60' : 
+              'bg-white/40'
+            ]" 
+          />
+          <div class="flex flex-col">
+            <span 
+              class="text-[13px] font-black capitalize leading-none tracking-tight"
+              :class="store.pipelineStatus === 'running' ? 'text-accent' : store.pipelineStatus === 'completed' ? 'text-success' : 'text-white'"
+            >
+              {{ store.pipelineStatus === 'running' ? 'Analyzing Data' : store.pipelineStatus === 'completed' ? 'Analysis Ready' : 'System Idle' }}
+            </span>
+            <span class="text-[11px] text-white/70 mt-1.5 font-bold tracking-tight">Modified Kleinberg × Link Anomaly</span>
+          </div>
+        </div>
       </div>
     </aside>
 

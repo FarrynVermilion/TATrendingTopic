@@ -3,8 +3,9 @@ from . import views
 
 urlpatterns = [
     # ─── Pipeline Endpoints ──────────────────────────────────────────────────
-    # Step 1: Dataset Overview
+    # Step 1: Dataset Overview & Upload
     path('dataset/overview/', views.dataset_overview, name='dataset_overview'),
+    path('dataset/upload/', views.dataset_upload, name='dataset_upload'),
 
     # Pipeline Orchestration
     path('pipeline/start/', views.pipeline_start, name='pipeline_start'),

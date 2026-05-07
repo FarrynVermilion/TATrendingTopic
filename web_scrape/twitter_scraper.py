@@ -675,22 +675,27 @@ class ScrapingEngine:
                         while len(extracted) < t.limit and tws:
                             found_fresh = False
                             for tweet in tws:
+                                # Stop processing the page once the limit is already satisfied
+                                if len(extracted) >= t.limit:
+                                    break
+
                                 t_id = str(tweet.id)
                                 if t_id in t.ids:
                                     log(f"Skip: @{tweet.user.screen_name:<16} │ Duplicate Entity", "FILE")
                                     duplicates_skipped += 1
                                     continue
-                                
-                                found_fresh = True; t.ids.add(t_id)
-                                n += 1 
-                                if len(extracted) >= t.limit: break
-                                
+
+                                # Append first, then register — so the ID is only marked
+                                # as seen once the tweet is safely stored.
                                 msg = tweet.text.replace('\n', ' ')
                                 extracted.append({
                                     "keyword": t.query, "tweet_id": tweet.id, "username": tweet.user.name, "handle": tweet.user.screen_name,
                                     "text": msg, "sentiment": DataEngine.analyze_sentiment(msg), "url": f"https://x.com/status/{tweet.id}",
                                     "datetime": tweet.created_at, "likes": tweet.favorite_count, "retweets": tweet.retweet_count, "replies": tweet.reply_count
                                 })
+                                t.ids.add(t_id)
+                                n += 1
+                                found_fresh = True
                                 log(f"+ Vault: @{tweet.user.screen_name:<15} │ Trajectory: {n}/{t.limit} │ Extracted: {len(extracted)}", "SUCCESS")
 
                             if not found_fresh:
@@ -811,6 +816,16 @@ class AnalyticaDashboard:
             results = await asyncio.gather(*(chunk_runner(it, j) for j, it in enumerate(tasks)), return_exceptions=True)
             for res in results:
                 if not isinstance(res, Exception) and res[0]: data.extend(res[0])
+            # Deduplicate the accumulated list in-place before flushing to disk,
+            # guarding against any parallel-task race that slipped a duplicate through.
+            seen_ids: Set[str] = set()
+            deduped: List[Dict] = []
+            for row in data:
+                rid = str(row.get('tweet_id', ''))
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    deduped.append(row)
+            data = deduped
             DataEngine.sync_to_disk(data, f_name)
             
             if i + len(self.pool.accs) < len(timeline): await asyncio.sleep(2)
@@ -839,6 +854,15 @@ class AnalyticaDashboard:
                     
                     for k, res in enumerate(results):
                         stats[chunk[k]] += res[1]; data.extend(res[0])
+                    # Deduplicate before flush to prevent parallel races from writing dupes.
+                    seen_ids_p: Set[str] = set()
+                    deduped_p: List[Dict] = []
+                    for row in data:
+                        rid = str(row.get('tweet_id', ''))
+                        if rid and rid not in seen_ids_p:
+                            seen_ids_p.add(rid)
+                            deduped_p.append(row)
+                    data = deduped_p
                     DataEngine.sync_to_disk(data, f_name)
                 
                 if AppState.STOP_REQUESTED: break

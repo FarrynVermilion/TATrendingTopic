@@ -11,8 +11,9 @@ import type {
   PipelineStatus,
   StepId,
   StepDefinition,
+  AnalysisConfig,
 } from '@/types/analysis'
-import * as api from '@/services/api'
+import * as apiService from '@/services/apiService'
 
 export const useAnalysisStore = defineStore('analysis', () => {
   // ─── Pipeline Control ───────────────────────────────────────────────
@@ -48,6 +49,15 @@ export const useAnalysisStore = defineStore('analysis', () => {
 
   const networkData = ref<NetworkData>({
     nodes: [], edges: [], anomalies: [],
+  })
+
+  // ─── Global Configuration ─────────────────────────────────────────
+
+  const analysisConfig = ref<AnalysisConfig>({
+    kleinberg_s: 2.0,
+    kleinberg_gamma: 1.0,
+    anomaly_threshold: 0.8,
+    min_ngram_freq: 5,
   })
 
   // ─── Step 5: Summary ──────────────────────────────────────────────
@@ -93,8 +103,27 @@ export const useAnalysisStore = defineStore('analysis', () => {
     isLoading.value = true
     pipelineError.value = null
     try {
-      const data = await api.getDatasetOverview()
-      datasetMeta.value = data
+      const { overview } = await apiService.getDatasetOverview()
+      datasetMeta.value = overview
+    } catch (err: any) {
+      // If no dataset is loaded (404), we don't treat it as an error
+      // so that the UI can show the Upload panel.
+      if (err.response?.status === 404) {
+        datasetMeta.value = null
+      } else {
+        pipelineError.value = err.response?.data?.error || err.message
+      }
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function uploadDatasets(file: File) {
+    isLoading.value = true
+    pipelineError.value = null
+    try {
+      const { overview } = await apiService.uploadDatasets(file)
+      datasetMeta.value = overview
     } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
     } finally {
@@ -102,13 +131,41 @@ export const useAnalysisStore = defineStore('analysis', () => {
     }
   }
 
-  async function startPipeline() {
+  async function startPipeline(config: any = {}) {
     isLoading.value = true
     pipelineStatus.value = 'running'
     pipelineError.value = null
     try {
-      await api.startPipeline()
-      pipelineStatus.value = 'running'
+      console.log('--- ANALYSIS PIPELINE v2.0 ---')
+      console.log('Starting pipeline...', { apiService })
+      if (typeof apiService.getPipelineStatus !== 'function') {
+        throw new Error('Critical: apiService.getPipelineStatus is not a function! Check imports.')
+      }
+      await apiService.startPipeline(config)
+      
+      // Poll for completion
+      let finished = false
+      while (!finished) {
+        try {
+          const { status } = await apiService.getPipelineStatus()
+          console.log('Poll status:', status)
+          pipelineStatus.value = status as PipelineStatus
+          
+          if (status === 'completed') {
+            finished = true
+          } else if (status === 'error') {
+            throw new Error('Pipeline failed on server')
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+          }
+        } catch (pollErr: any) {
+          console.error('POLLING ERROR:', pollErr)
+          pipelineError.value = pollErr.message
+          pipelineStatus.value = 'error'
+          throw pollErr
+        }
+      }
+
       currentStep.value = 2
       // Automatically fetch step 2 data
       await Promise.all([
@@ -125,7 +182,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
 
   async function fetchNgrams(page: number = 1) {
     try {
-      const data = await api.getNgrams(page)
+      const data = await apiService.getNgrams(page)
       ngrams.value = data
     } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
@@ -134,7 +191,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
 
   async function fetchEdges(page: number = 1) {
     try {
-      const data = await api.getEdges(page)
+      const data = await apiService.getEdges(page)
       edgeList.value = data
     } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
@@ -145,7 +202,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
     isLoading.value = true
     pipelineError.value = null
     try {
-      const data = await api.getBurstAnalysis(term)
+      const data = await apiService.getBurstAnalysis(term)
       burstAnalysis.value = data
       if (term) selectedBurstTerm.value = term
       else if (data.available_terms.length > 0) {
@@ -162,7 +219,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
     isLoading.value = true
     pipelineError.value = null
     try {
-      const data = await api.getNetworkData()
+      const data = await apiService.getNetworkData()
       networkData.value = data
     } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
@@ -175,8 +232,8 @@ export const useAnalysisStore = defineStore('analysis', () => {
     isLoading.value = true
     pipelineError.value = null
     try {
-      const data = await api.getTrendSummary()
-      trendResults.value = data.trends
+      const { trends } = await apiService.getTrendSummary()
+      trendResults.value = trends
       pipelineStatus.value = 'completed'
     } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
@@ -226,12 +283,14 @@ export const useAnalysisStore = defineStore('analysis', () => {
     selectedBurstTerm,
     networkData,
     trendResults,
+    analysisConfig,
     steps,
     canGoNext,
     canGoPrev,
 
     // Actions
     fetchDatasetOverview,
+    uploadDatasets,
     startPipeline,
     fetchNgrams,
     fetchEdges,

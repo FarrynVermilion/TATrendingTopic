@@ -100,16 +100,30 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-8">
-    <div class="float-up">
-      <div class="flex items-center gap-3 mb-2">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
-          </svg>
+    <div class="card !p-6 float-up bg-gradient-to-br from-white to-surface-alt border border-border/50">
+      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-8">
+        <!-- Title & Subtitle -->
+        <div class="space-y-1">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-danger/10 flex items-center justify-center text-danger">
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
+              </svg>
+            </div>
+            <h2 class="text-2xl font-bold text-text tracking-tight">Link Anomaly Detection</h2>
+          </div>
+          <p class="text-sm text-text-muted pl-13">Mention-based network graph with anomaly highlighting</p>
         </div>
-        <div>
-          <h2 class="text-2xl font-bold text-text">Link Anomaly Detection</h2>
-          <p class="text-sm text-text-muted">Mention-based network graph with anomaly highlighting</p>
+
+        <!-- Formula Panel -->
+        <div class="px-5 py-3 rounded-xl bg-danger/5 border border-danger/10 flex items-center gap-6">
+          <div class="space-y-1">
+            <p class="text-[10px] font-black uppercase tracking-widest text-danger">Anomaly Score (Z-Score)</p>
+            <div class="font-mono text-[11px] font-bold text-text py-1 leading-tight">
+              Score = (Deg<sub class="text-[8px]">obs</sub> - E[Deg]) / <span class="text-danger">σ</span><sub class="text-[8px]">Deg</sub>
+            </div>
+            <p class="text-[9px] text-text-muted italic">Detecting statistically improbable connection densities</p>
+          </div>
         </div>
       </div>
     </div>
