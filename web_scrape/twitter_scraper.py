@@ -528,20 +528,37 @@ class TwitterAccount:
             log(f"Acct {self.idx}: Validating saved session...", "AUTH")
             while True:
                 try:
+                    # Reinitialize the client each attempt to discard any stale
+                    # HTTP session / transaction state from the previous failure.
+                    self.client = Client('en-US')
                     self.client.load_cookies(self.cookies_file)
                     log(f"Acct {self.idx}: Testing API connection...", "WAIT")
                     await self.client.search_tweet('test', 'Latest', count=1)
                     log(f"Acct {self.idx}: ACTIVE (API OK)", "SUCCESS")
                     return True
                 except Exception as e:
-                    log(f"Acct {self.idx}: INACTIVE or INVALID ({e}). Requires re-auth.", "ERROR")
-                    
-                    ans = get_input(f"Account {self.idx}: (r)etry test, (y)es re-auth, or (n)o skip? (r/y/n)", "y")
+                    log(f"Acct {self.idx}: INACTIVE or INVALID ({e}).", "ERROR")
+
+                    print(f"\n  {Theme.BOLD}{Theme.YELLOW}OPTIONS:{Theme.RESET}"
+                          f"\n  {Theme.YELLOW}(r){Theme.RESET} Retry  — update the cookies file on disk first, then press r to re-test"
+                          f"\n  {Theme.YELLOW}(y){Theme.RESET} Re-auth — enter credentials or paste cookies manually"
+                          f"\n  {Theme.YELLOW}(n){Theme.RESET} Skip   — exclude this account from the session\n")
+
+                    ans = get_input(f"Account {self.idx}: choice (r/y/n)", "y")
                     ans_lower = str(ans).lower()
                     if ans_lower == 'r':
+                        log(f"Waiting for you to update '{os.path.basename(self.cookies_file)}'...", "WAIT")
+                        print(f"  {Theme.CYAN}How to get fresh cookies:{Theme.RESET}"
+                              f"\n    1. Open Twitter/X in your browser and log in"
+                              f"\n    2. DevTools (F12) → Application → Cookies → x.com"
+                              f"\n    3. Copy the values of  auth_token  and  ct0"
+                              f"\n    4. Update the file:  {self.cookies_file}"
+                              f"\n    5. Press Enter below when done\n")
+                        input(f"{Theme.BOLD}  ↵ Press Enter to retry the connection test...{Theme.RESET}")
+                        # Loop continues → load_cookies picks up the updated file
                         continue
                     elif ans_lower != 'y':
-                        log(f"Skipping re-auth for Account {self.idx}.", "WAIT")
+                        log(f"Skipping Account {self.idx}.", "WAIT")
                         return False
                     break
 
@@ -876,6 +893,77 @@ class AnalyticaDashboard:
                     break
         except KeyboardInterrupt: log("Continuous poll manually aborted.", "WAIT")
 
+    async def recalculate_historical(self):
+        """Module: Recount tweets_per_date for every row in an existing archive."""
+        AppState.STOP_REQUESTED = False
+        print_header("RECALCULATE TWEETS PER DATE")
+
+        # ── Pick archive ──────────────────────────────────────────────────────
+        root = os.path.dirname(os.path.abspath(__file__))
+        csv_files = sorted(glob.glob(os.path.join(root, '*.csv')))
+        if csv_files:
+            print(f" {Theme.BOLD}DETECTED ARCHIVES:{Theme.RESET}")
+            for i, fp in enumerate(csv_files, 1):
+                size = os.path.getsize(fp)
+                print(f"  {Theme.YELLOW}[{i}]{Theme.RESET} {os.path.basename(fp)}  ({size // 1024} KB)")
+            sel = get_input("Select archive # (or type filename without .csv)", "1")
+            if str(sel).isdigit() and 1 <= int(sel) <= len(csv_files):
+                f_name = os.path.splitext(csv_files[int(sel) - 1])[0]
+            else:
+                f_name = sel if sel else None
+        else:
+            f_name = get_input("Archive Filename (no extension)")
+
+        if not f_name:
+            log("No archive selected. Aborting.", "ERROR")
+            return
+
+        data = DataEngine.load_full(f_name)
+        if not data:
+            log(f"Archive '{f_name}' is empty or not found.", "ERROR")
+            return
+
+        # ── Show BEFORE counts ────────────────────────────────────────────────
+        before: Counter = Counter()
+        for row in data:
+            before[str(row.get('datetime', ''))[:10]] += 1
+
+        print(f"\n  {Theme.BOLD}Current tweets_per_date (before recount):{Theme.RESET}")
+        for date, cnt in sorted(before.items()):
+            bar = '█' * min(cnt // 2, 50)
+            print(f"    {Theme.CYAN}{date}{Theme.RESET}  {bar} {cnt}")
+
+        # ── Deduplicate by tweet_id ───────────────────────────────────────────
+        seen_ids = set()
+        deduped_data = []
+        for row in data:
+            rid = str(row.get('tweet_id', ''))
+            if rid and rid not in seen_ids:
+                seen_ids.add(rid)
+                deduped_data.append(row)
+        
+        dupes_removed = len(data) - len(deduped_data)
+        if dupes_removed > 0:
+            log(f"Removed {dupes_removed} duplicate records.", "TASK")
+            data = deduped_data
+
+        # ── Recount via sync_to_disk (it recalculates tweets_per_date internally)
+        log(f"Recounting {len(data)} records across {len(before)} date(s)...", "TASK")
+        DataEngine.sync_to_disk(data, f_name)
+
+        # ── Show AFTER counts ─────────────────────────────────────────────────
+        after_data = DataEngine.load_full(f_name)
+        after: Counter = Counter()
+        for row in after_data:
+            after[str(row.get('datetime', ''))[:10]] += 1
+
+        print(f"\n  {Theme.BOLD}Updated tweets_per_date (after recount):{Theme.RESET}")
+        for date, cnt in sorted(after.items()):
+            bar = '█' * min(cnt // 2, 50)
+            print(f"    {Theme.CYAN}{date}{Theme.RESET}  {bar} {cnt}")
+
+        log(f"Done. {len(data)} records updated in '{os.path.basename(DataEngine._path(f_name))}'.", "SUCCESS")
+
     async def add_new_account(self):
         """Module: Expand rotation pool interactively."""
         print_header("SECURE ACCOUNT REGISTRATION")
@@ -932,13 +1020,14 @@ async def main():
     
     dash = AnalyticaDashboard(WorkerPool(accounts))
     MENU = {
-        "1": ("Trends Discovery", "Auto-fetch and scrape current trending vectors on X.", lambda: dash.custom_search(trends=True)),
-        "2": ("Custom Search", "Perform a targeted semantic search with date filters.", dash.custom_search),
-        "3": ("Historical Deep-Dive", "Reconstruct granular timelines using time-chunking.", dash.historical_interval),
-        "4": ("Persistent Monitor", "Sustain real-time architectural polling of keywords.", dash.continuous_poll),
-        "5": ("Link New Account", "Inject a fresh Twitter identity into the rotation fleet.", dash.add_new_account),
-        "6": ("Decommission Account", "De-link and securely wipe an account cookie file.", dash.remove_account),
-        "0": ("Terminate Console", "Safely flush memory queues and power down all tools.", None)
+        "1": ("Trends Discovery",        "Auto-fetch and scrape current trending vectors on X.",                lambda: dash.custom_search(trends=True)),
+        "2": ("Custom Search",            "Perform a targeted semantic search with date filters.",              dash.custom_search),
+        "3": ("Historical Deep-Dive",     "Reconstruct granular timelines using time-chunking.",                dash.historical_interval),
+        "4": ("Recalc Historical",        "Re-plan an archive: extend, gap-fill, or change date/amount.",      dash.recalculate_historical),
+        "5": ("Persistent Monitor",       "Sustain real-time architectural polling of keywords.",               dash.continuous_poll),
+        "6": ("Link New Account",         "Inject a fresh Twitter identity into the rotation fleet.",           dash.add_new_account),
+        "7": ("Decommission Account",     "De-link and securely wipe an account cookie file.",                 dash.remove_account),
+        "0": ("Terminate Console",        "Safely flush memory queues and power down all tools.",              None)
     }
 
     while dash.is_running:
@@ -946,12 +1035,12 @@ async def main():
         print(f"{Theme.BLUE}{'─'*AppConfig.DASHBOARD_WIDTH}{Theme.RESET}")
         
         print(f" {Theme.BOLD}DATA EXTRACTION MATRIX:{Theme.RESET}")
-        for k in ["1", "2", "3", "4"]:
+        for k in ["1", "2", "3", "4", "5"]:
             n, d, _ = MENU[k]
             print(f"  {Theme.YELLOW}[{k}]{Theme.RESET} {Theme.BOLD}{n:<22}{Theme.RESET} {Theme.CYAN}➔{Theme.RESET} {d}")
         
         print(f"\n {Theme.BOLD}FLEET MANAGEMENT:{Theme.RESET}")
-        for k in ["5", "6"]:
+        for k in ["6", "7"]:
             n, d, _ = MENU[k]
             print(f"  {Theme.YELLOW}[{k}]{Theme.RESET} {Theme.BOLD}{n:<22}{Theme.RESET} {Theme.CYAN}➔{Theme.RESET} {d}")
             
