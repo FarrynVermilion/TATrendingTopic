@@ -8,19 +8,7 @@ const store = useAnalysisStore()
 
 const datasetFile = ref<File | undefined>(undefined)
 
-const config = ref({
-  top_n_terms: 50,
-  bin_hours: 1,
-  kleinberg_s: 2.0,
-  kleinberg_gamma: 1.0,
-  anomaly_threshold: 0.5,
-})
-
 const fileInput = ref<HTMLInputElement | null>(null)
-
-function handleStartPipeline() {
-  store.startPipeline(config.value)
-}
 
 function handleFileUpload(event: Event) {
   const target = event.target as HTMLInputElement
@@ -237,111 +225,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Pipeline Configuration Panel -->
-      <div class="card float-up" style="animation-delay: 0.2s;">
-        <div class="flex items-center gap-2 mb-4">
-          <svg class="w-5 h-5 text-primary" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12a7.5 7.5 0 0 0 15 0m-15 0a7.5 7.5 0 1 1 15 0m-15 0H3m16.5 0H21m-1.5 0H12m-8.457 3.077 1.41-.513m14.095-5.128 1.41-.513M5.106 17.785l1.15-.964m11.49-9.642 1.149-.964M7.501 19.795l.75-1.3m7.5-12.99.75-1.3m2.786 14.128-1.41-.514M5.106 6.215l1.15.964m11.49 9.642 1.149.964M10.501 19.795l-.75-1.3m7.5-12.99-.75-1.3" />
-          </svg>
-          <h3 class="text-sm font-bold text-text uppercase tracking-wider">Pipeline Configuration</h3>
-        </div>
-
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-          <!-- Top N Terms -->
-          <div class="space-y-1.5">
-            <label class="text-[10px] font-bold text-text-muted uppercase">Top N Terms</label>
-            <input
-              v-model.number="config.top_n_terms"
-              type="number"
-              min="5"
-              max="200"
-              class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-            />
-          </div>
-
-          <!-- Bin Hours -->
-          <div class="space-y-1.5">
-            <label class="text-[10px] font-bold text-text-muted uppercase">Bin Hours</label>
-            <input
-              v-model.number="config.bin_hours"
-              type="number"
-              min="1"
-              max="24"
-              class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-            />
-          </div>
-
-          <!-- Kleinberg S -->
-          <div class="space-y-1.5">
-            <label class="text-[10px] font-bold text-text-muted uppercase">Kleinberg S</label>
-            <input
-              v-model.number="config.kleinberg_s"
-              type="number"
-              step="0.1"
-              min="1.1"
-              class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-            />
-          </div>
-
-          <!-- Kleinberg Gamma -->
-          <div class="space-y-1.5">
-            <label class="text-[10px] font-bold text-text-muted uppercase">Gamma</label>
-            <input
-              v-model.number="config.kleinberg_gamma"
-              type="number"
-              step="0.1"
-              min="0.1"
-              class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-            />
-          </div>
-
-          <!-- Anomaly Threshold -->
-          <div class="space-y-1.5">
-            <label class="text-[10px] font-bold text-text-muted uppercase">Threshold θ</label>
-            <input
-              v-model.number="config.anomaly_threshold"
-              type="number"
-              step="0.05"
-              min="0.1"
-              max="0.9"
-              class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all"
-            />
-          </div>
-        </div>
-      </div>
-
-      <!-- Methodology Note -->
-      <div class="card float-up border-l-4 border-l-primary" style="animation-delay: 0.3s;">
-        <div class="flex gap-3">
-          <svg class="w-5 h-5 text-primary shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
-          </svg>
-          <div>
-            <h4 class="text-sm font-bold text-text mb-1">Methodology</h4>
-            <p class="text-sm text-text-muted leading-relaxed">
-              This pipeline applies a <strong class="text-text">Modified Term-Level Burst Kleinberg</strong> algorithm 
-              to detect temporal bursts in term frequencies, followed by <strong class="text-text">Mention-Based Link Anomaly Detection</strong> 
-              to validate trends against network manipulation (bot networks, astroturfing). The combination produces 
-              a dual-validated trending topic classification.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Start Button -->
-      <div class="flex justify-end">
-        <button
-          id="btn-start-pipeline"
-          class="btn-primary text-base glow-pulse"
-          :disabled="store.isLoading"
-          @click="handleStartPipeline"
-        >
-          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z" />
-          </svg>
-          Start Analysis Pipeline
-        </button>
-      </div>
+      <!-- Removed Configuration Panel & Start Button (now in individual steps) -->
     </div>
   </div>
 </template>

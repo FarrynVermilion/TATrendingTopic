@@ -54,10 +54,16 @@ export const useAnalysisStore = defineStore('analysis', () => {
   // ─── Global Configuration ─────────────────────────────────────────
 
   const analysisConfig = ref<AnalysisConfig>({
+    text_column: 'text',
+    time_column: 'datetime',
+    cleaned_text_column: 'cleaned_text',
+    handle_column: 'handle',
     kleinberg_s: 2.0,
     kleinberg_gamma: 1.0,
     anomaly_threshold: 0.8,
     min_ngram_freq: 5,
+    top_n_terms: 50,
+    bin_hours: 1,
   })
 
   // ─── Step 5: Summary ──────────────────────────────────────────────
@@ -94,7 +100,14 @@ export const useAnalysisStore = defineStore('analysis', () => {
     },
   ])
 
-  const canGoNext = computed(() => currentStep.value < 5 && !isLoading.value)
+  const canGoNext = computed(() => {
+    if (isLoading.value) return false
+    if (currentStep.value === 1) return datasetMeta.value !== null
+    if (currentStep.value === 2) return ngrams.value.count > 0
+    if (currentStep.value === 3) return burstAnalysis.value.term_frequencies.length > 0
+    if (currentStep.value === 4) return networkData.value.nodes.length > 0
+    return currentStep.value < 5
+  })
   const canGoPrev = computed(() => currentStep.value > 1 && !isLoading.value)
 
   // ─── Actions ──────────────────────────────────────────────────────
@@ -131,49 +144,73 @@ export const useAnalysisStore = defineStore('analysis', () => {
     }
   }
 
-  async function startPipeline(config: any = {}) {
+  // ─── Step Actions ──────────────────────────────────────────────────
+
+  async function runPreprocessing() {
     isLoading.value = true
-    pipelineStatus.value = 'running'
     pipelineError.value = null
     try {
-      console.log('--- ANALYSIS PIPELINE v2.0 ---')
-      console.log('Starting pipeline...', { apiService })
-      if (typeof apiService.getPipelineStatus !== 'function') {
-        throw new Error('Critical: apiService.getPipelineStatus is not a function! Check imports.')
-      }
-      await apiService.startPipeline(config)
-      
-      // Poll for completion
-      let finished = false
-      while (!finished) {
-        try {
-          const { status } = await apiService.getPipelineStatus()
-          console.log('Poll status:', status)
-          pipelineStatus.value = status as PipelineStatus
-          
-          if (status === 'completed') {
-            finished = true
-          } else if (status === 'error') {
-            throw new Error('Pipeline failed on server')
-          } else {
-            await new Promise(resolve => setTimeout(resolve, 2000))
-          }
-        } catch (pollErr: any) {
-          console.error('POLLING ERROR:', pollErr)
-          pipelineError.value = pollErr.message
-          pipelineStatus.value = 'error'
-          throw pollErr
-        }
-      }
-
-      currentStep.value = 2
-      // Automatically fetch step 2 data
+      await apiService.runPreprocessing({
+        text_column: analysisConfig.value.cleaned_text_column, // Preprocessing uses cleaned_text for n-grams
+        time_column: analysisConfig.value.time_column,
+        handle_column: analysisConfig.value.handle_column,
+      })
       await Promise.all([
         fetchNgrams(1),
         fetchEdges(1),
       ])
     } catch (err: any) {
-      pipelineStatus.value = 'error'
+      pipelineError.value = err.response?.data?.error || err.message
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function runBurstDetection() {
+    isLoading.value = true
+    pipelineError.value = null
+    try {
+      const data = await apiService.runBurstDetection({
+        kleinberg_s: analysisConfig.value.kleinberg_s,
+        kleinberg_gamma: analysisConfig.value.kleinberg_gamma,
+        top_n_terms: analysisConfig.value.top_n_terms,
+        bin_hours: analysisConfig.value.bin_hours,
+      })
+      burstAnalysis.value = data
+      if (data.available_terms.length > 0) {
+        selectedBurstTerm.value = data.available_terms[0]
+      }
+    } catch (err: any) {
+      pipelineError.value = err.response?.data?.error || err.message
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function runLinkAnomaly() {
+    isLoading.value = true
+    pipelineError.value = null
+    try {
+      const data = await apiService.runLinkAnomaly({
+        anomaly_threshold: analysisConfig.value.anomaly_threshold,
+      })
+      networkData.value = data
+    } catch (err: any) {
+      pipelineError.value = err.response?.data?.error || err.message
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function runTrendSummary() {
+    isLoading.value = true
+    pipelineError.value = null
+    try {
+      const { trends } = await apiService.runTrendSummary({
+        anomaly_threshold: analysisConfig.value.anomaly_threshold,
+      })
+      trendResults.value = trends
+    } catch (err: any) {
       pipelineError.value = err.response?.data?.error || err.message
     } finally {
       isLoading.value = false
@@ -291,7 +328,10 @@ export const useAnalysisStore = defineStore('analysis', () => {
     // Actions
     fetchDatasetOverview,
     uploadDatasets,
-    startPipeline,
+    runPreprocessing,
+    runBurstDetection,
+    runLinkAnomaly,
+    runTrendSummary,
     fetchNgrams,
     fetchEdges,
     fetchBurstAnalysis,

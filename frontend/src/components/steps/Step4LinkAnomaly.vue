@@ -100,7 +100,29 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-8">
-    <div class="card !p-6 float-up bg-gradient-to-br from-white to-surface-alt border border-border/50">
+    <!-- Configuration Panel -->
+    <div class="card float-up border border-danger/20 bg-gradient-to-br from-danger/5 to-transparent">
+      <div class="flex items-center gap-2 mb-4">
+        <svg class="w-5 h-5 text-danger" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <h3 class="text-sm font-bold text-text uppercase tracking-wider">Link Anomaly Settings</h3>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-text-muted uppercase">Anomaly Threshold θ</label>
+          <input v-model.number="store.analysisConfig.anomaly_threshold" type="number" step="0.05" min="0.1" max="0.9" class="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-danger/20 outline-none" />
+        </div>
+      </div>
+      <div class="mt-4 flex justify-end">
+        <button class="btn-primary glow-pulse" :disabled="store.isLoading" @click="store.runLinkAnomaly()">
+          Run Link Anomaly
+        </button>
+      </div>
+    </div>
+
+    <div v-show="store.networkData.nodes.length > 0" class="flex flex-col gap-6 float-up" style="animation-delay: 0.1s;">
+      <div class="card !p-6 float-up bg-gradient-to-br from-white to-surface-alt border border-border/50">
       <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-8">
         <!-- Title & Subtitle -->
         <div class="space-y-1">
@@ -184,6 +206,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+    </div>
     </div>
   </div>
 </template>

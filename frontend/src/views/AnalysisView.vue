@@ -64,7 +64,6 @@ const { currentStep, canGoNext, canGoPrev, handleNext, handlePrev, isLoading } =
 
     <!-- Bottom Navigation -->
     <div
-      v-if="currentStep > 1"
       class="flex items-center justify-between pt-4 border-t border-border"
     >
       <button

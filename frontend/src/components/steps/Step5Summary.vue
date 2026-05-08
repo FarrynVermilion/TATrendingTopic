@@ -21,7 +21,19 @@ const store = useAnalysisStore()
       </div>
     </div>
 
-    <!-- Stats Row -->
+    <!-- Run Panel -->
+    <div v-if="store.trendResults.length === 0" class="card float-up border border-success/20 bg-gradient-to-br from-success/5 to-transparent flex items-center justify-between">
+      <div class="space-y-1">
+        <h3 class="text-sm font-bold text-text uppercase tracking-wider">Final Analysis</h3>
+        <p class="text-xs text-text-muted">Combine burst and anomaly data to generate the final trend report.</p>
+      </div>
+      <button class="btn-primary bg-success hover:bg-success/90 glow-pulse text-white" :disabled="store.isLoading" @click="store.runTrendSummary()">
+        Generate Executive Summary
+      </button>
+    </div>
+
+    <div v-else class="space-y-8">
+      <!-- Stats Row -->
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 float-up">
       <!-- KPI Counts -->
       <div class="lg:col-span-5 grid grid-cols-2 gap-4">
@@ -120,14 +132,15 @@ const store = useAnalysisStore()
       </div>
     </div>
 
-    <!-- Reset Button -->
-    <div class="flex justify-center pt-4 float-up" style="animation-delay: 0.3s;">
-      <button class="btn-secondary" @click="store.resetPipeline()">
-        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" />
-        </svg>
-        Run New Analysis
-      </button>
+      <!-- Reset Button -->
+      <div class="flex justify-center pt-4 float-up" style="animation-delay: 0.3s;">
+        <button class="btn-secondary" @click="store.resetPipeline()">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" />
+          </svg>
+          Run New Analysis
+        </button>
+      </div>
     </div>
   </div>
 </template>

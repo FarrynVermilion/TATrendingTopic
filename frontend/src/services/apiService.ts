@@ -55,6 +55,11 @@ export async function getPipelineStatus(): Promise<{ status: string; pipeline_id
 
 // ─── Step 2: Preprocessing ──────────────────────────────────────────────────
 
+export async function runPreprocessing(config: any = {}): Promise<{ message: string; total_tokens: number }> {
+  const { data } = await httpClient.post('/preprocessing/run/', config)
+  return data
+}
+
 export async function getNgrams(page: number = 1): Promise<PaginatedResponse<NGram>> {
   const { data } = await httpClient.get<PaginatedResponse<NGram>>('/preprocessing/ngrams/', {
     params: { page },
@@ -71,6 +76,11 @@ export async function getEdges(page: number = 1): Promise<PaginatedResponse<Edge
 
 // ─── Step 3: Burst Kleinberg ────────────────────────────────────────────────
 
+export async function runBurstDetection(config: any = {}): Promise<BurstAnalysis> {
+  const { data } = await httpClient.post<BurstAnalysis>('/burst/analysis/', config)
+  return data
+}
+
 export async function getBurstAnalysis(term?: string): Promise<BurstAnalysis> {
   const { data } = await httpClient.get<BurstAnalysis>('/burst/analysis/', {
     params: term ? { term } : {},
@@ -80,12 +90,22 @@ export async function getBurstAnalysis(term?: string): Promise<BurstAnalysis> {
 
 // ─── Step 4: Link Anomaly ───────────────────────────────────────────────────
 
+export async function runLinkAnomaly(config: any = {}): Promise<NetworkData> {
+  const { data } = await httpClient.post<NetworkData>('/link-anomaly/network/', config)
+  return data
+}
+
 export async function getNetworkData(): Promise<NetworkData> {
   const { data } = await httpClient.get<NetworkData>('/link-anomaly/network/')
   return data
 }
 
 // ─── Step 5: Executive Summary ──────────────────────────────────────────────
+
+export async function runTrendSummary(config: any = {}): Promise<{ trends: TrendResult[] }> {
+  const { data } = await httpClient.post<{ trends: TrendResult[] }>('/summary/trends/', config)
+  return data
+}
 
 export async function getTrendSummary(): Promise<{ trends: TrendResult[] }> {
   const { data } = await httpClient.get<{ trends: TrendResult[] }>('/summary/trends/')

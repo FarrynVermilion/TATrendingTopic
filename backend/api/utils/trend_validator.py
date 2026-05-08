@@ -212,6 +212,9 @@ def run_full_pipeline(df_raw: pd.DataFrame,
     overview = compute_dataset_overview(df_raw, df_cleaned)
 
     # ─── Step 2: Preprocessing ───────────────────────────────────────
+    if 'cleaned_text' not in df_cleaned.columns and 'text' in df_cleaned.columns:
+        df_cleaned['cleaned_text'] = df_cleaned['text']
+        
     cleaned_texts = df_cleaned['cleaned_text'].dropna().astype(str).tolist()
     ngrams, total_tokens = extract_ngrams(cleaned_texts, n_range=(1, 2), min_df=5)
     edge_list = extract_edge_list(df_raw)

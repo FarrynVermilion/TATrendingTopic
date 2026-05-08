@@ -266,6 +266,9 @@ def compute_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> 
         avg_per_hour = 0
         peak_rate = len(df_raw)
 
+    preview_data = df_raw.head(5).fillna('').to_dict(orient='records')
+    available_columns = df_raw.columns.tolist()
+
     return {
         'total_tweets': len(df_raw),
         'rate_limit': peak_rate,
@@ -276,4 +279,6 @@ def compute_dataset_overview(df_raw: pd.DataFrame, df_cleaned: pd.DataFrame) -> 
         'keyword_distribution': keyword_dist,
         'unique_users': int(df_raw['handle'].nunique()),
         'avg_tweets_per_hour': avg_per_hour,
+        'available_columns': available_columns,
+        'preview_data': preview_data,
     }

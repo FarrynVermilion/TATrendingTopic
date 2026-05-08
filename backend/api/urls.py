@@ -12,6 +12,7 @@ urlpatterns = [
     path('pipeline/status/', views.pipeline_status, name='pipeline_status'),
 
     # Step 2: Preprocessing
+    path('preprocessing/run/', views.preprocessing_run, name='preprocessing_run'),
     path('preprocessing/ngrams/', views.preprocessing_ngrams, name='preprocessing_ngrams'),
     path('preprocessing/edges/', views.preprocessing_edges, name='preprocessing_edges'),
 

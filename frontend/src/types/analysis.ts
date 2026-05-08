@@ -13,6 +13,8 @@ export interface DatasetMeta {
   keyword_distribution: Record<string, number>
   unique_users: number
   avg_tweets_per_hour: number
+  available_columns: string[]
+  preview_data: Record<string, any>[]
 }
 
 // ─── Step 2: Preprocessing ──────────────────────────────────────────────────
@@ -135,8 +137,14 @@ export interface StepDefinition {
 }
 
 export interface AnalysisConfig {
+  text_column: string
+  time_column: string
+  cleaned_text_column: string
+  handle_column: string
   kleinberg_s: number
   kleinberg_gamma: number
   anomaly_threshold: number
   min_ngram_freq: number
+  top_n_terms: number
+  bin_hours: number
 }

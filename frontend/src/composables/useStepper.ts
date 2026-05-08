@@ -27,22 +27,6 @@ export function useStepper() {
 
   async function handleNext() {
     if (!store.canGoNext) return
-
-    const next = (store.currentStep + 1) as StepId
-
-    // Trigger data fetching for the next step
-    switch (next) {
-      case 3:
-        await store.fetchBurstAnalysis()
-        break
-      case 4:
-        await store.fetchNetworkData()
-        break
-      case 5:
-        await store.fetchTrendSummary()
-        break
-    }
-
     store.nextStep()
   }
 

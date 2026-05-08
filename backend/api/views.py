@@ -64,6 +64,9 @@ def _load_datasets():
     # We use the same dataframe for both, but different columns will be used
     # df_raw will use 'text' and 'handle'
     # df_cleaned will use 'cleaned_text'
+    if 'cleaned_text' not in df.columns and 'text' in df.columns:
+        df['cleaned_text'] = df['text']
+        
     _pipeline_state['df_raw'] = df
     _pipeline_state['df_cleaned'] = df
 
@@ -175,6 +178,10 @@ def _run_pipeline_background(top_n_terms=50, bin_hours=1, s=2.0, gamma=1.0, anom
 
         df_raw = _pipeline_state['df_raw']
         df_cleaned = _pipeline_state['df_cleaned']
+
+        # Ensure cleaned_text exists even if loaded prior to fix
+        if 'cleaned_text' not in df_cleaned.columns and 'text' in df_cleaned.columns:
+            df_cleaned['cleaned_text'] = df_cleaned['text']
 
         # Step 2: Preprocessing
         cleaned_texts = df_cleaned['cleaned_text'].dropna().astype(str).tolist()
@@ -303,6 +310,55 @@ def pipeline_status(request):
 
 @csrf_exempt
 @api_key_required
+def preprocessing_run(request):
+    """
+    POST /api/preprocessing/run/
+    Runs preprocessing (N-grams & Edge extraction) with column configurations.
+    """
+    global _pipeline_state
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+        
+    if _pipeline_state.get('df_cleaned') is None:
+        return JsonResponse({'error': 'No dataset loaded'}, status=400)
+        
+    try:
+        config = json.loads(request.body) if request.body else {}
+        text_col = config.get('text_column', 'cleaned_text')
+        time_col = config.get('time_column', 'datetime')
+        handle_col = config.get('handle_column', 'handle')
+        
+        # Save these configurations so later steps can use them
+        _pipeline_state['config'] = {
+            'text_column': text_col,
+            'time_column': time_col,
+            'handle_column': handle_col
+        }
+        
+        from .utils.preprocessing import extract_ngrams, extract_edge_list
+        df_cleaned = _pipeline_state['df_cleaned']
+        df_raw = _pipeline_state['df_raw']
+        
+        # Ensure column exists or fallback
+        if text_col not in df_cleaned.columns and 'text' in df_cleaned.columns:
+            df_cleaned[text_col] = df_cleaned['text']
+            
+        texts = df_cleaned[text_col].dropna().astype(str).tolist()
+        ngrams_df, total_tokens = extract_ngrams(texts, n_range=(1, 2), min_df=5)
+        
+        edge_df = extract_edge_list(df_raw, text_col='text', handle_col=handle_col, time_col=time_col)
+        
+        _pipeline_state['ngrams'] = ngrams_df
+        _pipeline_state['total_tokens'] = total_tokens
+        _pipeline_state['edge_list'] = edge_df
+        
+        return JsonResponse({'message': 'Preprocessing complete', 'total_tokens': total_tokens})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@api_key_required
 def preprocessing_ngrams(request):
     """
     GET /api/preprocessing/ngrams/?page=1
@@ -370,8 +426,13 @@ def burst_analysis(request):
             from .utils.preprocessing import build_term_time_series
             from .utils.kleinberg import run_burst_detection
             
+            # Use configured columns if available
+            p_config = _pipeline_state.get('config', {})
+            text_col = p_config.get('text_column', 'cleaned_text')
+            time_col = p_config.get('time_column', 'datetime')
+            
             time_series = build_term_time_series(
-                _pipeline_state['df_cleaned'], text_col='cleaned_text', time_col='datetime',
+                _pipeline_state['df_cleaned'], text_col=text_col, time_col=time_col,
                 top_n_terms=top_n_terms, bin_hours=bin_hours,
             )
             
